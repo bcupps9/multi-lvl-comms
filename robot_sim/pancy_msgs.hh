@@ -572,47 +572,6 @@ struct formatter<pancy::execute_signal, CharT> {
     }
 };
 
-
-template <typename CharT>
-struct formatter<pancy::hidden_state_msg, CharT> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    template <typename FormatContext>
-    auto format(const pancy::hidden_state_msg& m, FormatContext& ctx) const {
-        return std::format_to(ctx.out(), "HIDDEN_STATE(from={}, dim={})",
-                              m.sender_id, m.h.size());
-    }
-};
-
-template <typename CharT>
-struct formatter<pancy::intention_msg, CharT> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    template <typename FormatContext>
-    auto format(const pancy::intention_msg& m, FormatContext& ctx) const {
-        return std::format_to(ctx.out(), "INTENTION(from={}, I={:.4f})",
-                              m.sender_id, m.intention);
-    }
-};
-
-template <typename CharT>
-struct formatter<pancy::upper_action_msg, CharT> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    template <typename FormatContext>
-    auto format(const pancy::upper_action_msg& m, FormatContext& ctx) const {
-        return std::format_to(ctx.out(), "UPPER_ACTION(from={}, dim={})",
-                              m.sender_id, m.action.size());
-    }
-};
-
-template <typename CharT>
-struct formatter<pancy::execute_signal, CharT> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    template <typename FormatContext>
-    auto format(const pancy::execute_signal& m, FormatContext& ctx) const {
-        return std::format_to(ctx.out(), "EXECUTE(from={}, t={})",
-                              m.sender_id, m.timestep);
-    }
-};
-
 template <typename CharT>
 struct formatter<pancy::inter_replica_msg, CharT> {
     constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
