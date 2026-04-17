@@ -15,7 +15,7 @@ namespace cot = cotamer;
 using namespace std::chrono_literals;
 template <typename T> struct channel;
 template <typename T> struct message_traits;
-extern const std::string disconnected_id;
+inline const std::string disconnected_id{"disconnected"};
 
 template <typename T, typename U>
 concept smart_pointer_to =
