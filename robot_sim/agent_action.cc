@@ -202,7 +202,7 @@ cot::task<void> Agent::launching_phase(int t) {
 
     // Environment step
     env.submit_action(id, action);
-    auto [next_obs, reward] = env.get_result(id);
+    auto [next_obs, reward] = co_await env.get_result(id);
 
     // Record transition
     trajectory.push_back({

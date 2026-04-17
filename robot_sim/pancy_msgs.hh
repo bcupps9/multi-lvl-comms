@@ -269,34 +269,6 @@ struct inter_replica_msg {
 };    
 
 // TODO: may want to make a wrapper for the single body of a inter_replica type
-// ── SeqComm agent-to-agent messages ──────────────────────────────────────────
-
-struct hidden_state_msg {
-    int sender_id;
-    std::vector<float> h;
-};
-
-struct intention_msg {
-    int sender_id;
-    float intention;
-};
-
-struct upper_action_msg {
-    int sender_id;
-    std::vector<float> action;
-};
-
-struct execute_signal {
-    int sender_id;
-    int timestep;
-};
-
-using agent_msg = std::variant<
-    hidden_state_msg,
-    intention_msg,
-    upper_action_msg,
-    execute_signal
->;
 
 
 // ── SeqComm agent-to-agent messages ──────────────────────────────────────────
