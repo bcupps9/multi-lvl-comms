@@ -33,9 +33,7 @@ add_library(Cotamer OBJECT
 )
 
 add_library(Pancy OBJECT
-    pancydb.cc
     client_model.cc
-    lockseq_model.cc
     utils.cc
 )
 
