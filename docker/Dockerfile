@@ -102,10 +102,12 @@ RUN apt-get update &&\
  python3-pip\
  python3-venv
 
-# install PyTorch (CPU-only wheel — no CUDA needed for dev/testing) and numpy
+# install Python deps from the repo's requirements.txt
+# CPU-only torch wheel — no CUDA needed inside the container
+COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --break-system-packages \
-    torch --index-url https://download.pytorch.org/whl/cpu &&\
-    python3 -m pip install --break-system-packages numpy
+    --index-url https://download.pytorch.org/whl/cpu \
+    -r /tmp/requirements.txt
 
 # set up default locale
 RUN locale-gen en_US.UTF-8

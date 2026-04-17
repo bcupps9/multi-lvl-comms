@@ -56,4 +56,4 @@ if test -n "$uid"; then
     args+=( --build-arg UID="$uid" )
 fi
 
-exec docker build -t "$tag" -f Dockerfile ${args[@]} .
+exec docker build -t "$tag" -f Dockerfile ${args[@]} ..
