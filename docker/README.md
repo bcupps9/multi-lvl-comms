@@ -28,8 +28,9 @@ The image is based on `ubuntu:questing` and includes:
 
 * **C++ toolchain**: GCC 15, Clang 21, GDB, CMake — for building the C++
   cotamer simulation (`robot_sim/`)
-* **Python 3 + PyTorch (CPU)** — for running the MAPPO training script
-  (`train.py`) and the `gaussian_field_env.py` environment
+* **Python 3 + PyTorch (CPU)** — installed from `requirements.txt`; for running
+  the MAPPO training script (`training/train.py`) and the environment
+  (`execution/gaussian_field_env.py`)
 * **Networking tools**: iproute2, netcat, tcpdump, etc.
 * The same base packages as the CS 2620 image (editors, man pages, sudo, etc.)
 
@@ -69,11 +70,27 @@ Then inside the container:
 
 ```shellsession
 cs286-user@a47f05ea5085:~$ cd multi-lvl-comms
-cs286-user@a47f05ea5085:~/multi-lvl-comms$ python3 train.py --episodes 5
+
+# quick training smoke test (5 episodes)
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ python3 -m training.train --episodes 5
 ep    0 | R=  64.45 | wm=8.6996  v=57.4526  π=-0.0000
 ...
-cs286-user@a47f05ea5085:~/multi-lvl-comms$ cd robot_sim && make
+
+# full training run + export weights
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ python3 -m training.train --episodes 2000 --weights-dir weights/
 ...
+Weights saved → /home/cs286-user/multi-lvl-comms/weights/
+
+# build stub sim (no libtorch needed)
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ cmake -B build && cmake --build build --target seqcomm-sim
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ ./build/robot_sim/seqcomm-sim
+
+# build trained sim (uses libtorch bundled with pip torch)
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ cmake -B build \
+    -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ cmake --build build --target seqcomm-sim-trained
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ ./build/robot_sim/seqcomm-sim-trained weights/
+
 cs286-user@a47f05ea5085:~/multi-lvl-comms$ cs61-docker-version
 25-cs286
 cs286-user@a47f05ea5085:~/multi-lvl-comms$ exit
