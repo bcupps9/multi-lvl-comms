@@ -49,7 +49,7 @@ while test "$#" -ne 0; do
 done
 
 if test -z "$tag"; then
-    tag=cs2620:latest
+    tag=cs286:latest
 fi
 
 if test -n "$uid"; then

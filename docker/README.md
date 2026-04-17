@@ -1,5 +1,5 @@
-CS 2620 Docker
-==============
+CS 286 Docker
+=============
 
 The [Docker][] container-based virtualization service lets you run a minimal
 Linux environment on a Mac OS X or Windows computer, without the overhead of a
@@ -15,123 +15,92 @@ Advantages of Docker:
 
 Disadvantages of Docker:
 
-* Docker does not offer a graphical environment. You will need to run comamnds
+* Docker does not offer a graphical environment. You will need to run commands
   exclusively in the terminal.
-* Docker technology is less user-friendly than virtual machines. You’ll have
+* Docker technology is less user-friendly than virtual machines. You'll have
   to type weird commands.
-* You won’t get the fun, different feeling of a graphical Linux desktop.
+* You won't get the fun, different feeling of a graphical Linux desktop.
 
 
-## Creating a CS 2620 Docker image
+## What's in this image
 
-To prepare to build your Docker environment:
+The image is based on `ubuntu:questing` and includes:
 
-1.  Download and install [Docker][].
+* **C++ toolchain**: GCC 15, Clang 21, GDB, CMake — for building the C++
+  cotamer simulation (`robot_sim/`)
+* **Python 3 + PyTorch (CPU)** — for running the MAPPO training script
+  (`train.py`) and the `gaussian_field_env.py` environment
+* **Networking tools**: iproute2, netcat, tcpdump, etc.
+* The same base packages as the CS 2620 image (editors, man pages, sudo, etc.)
 
-2.  Clone your [CS 2620 repository][repo] onto your computer.
 
-3.  Change into the `REPODIR/docker` directory.
+## Building the image
 
-4.  Run this command. It will take a while—up to ten minutes.
+1. Download and install [Docker][].
+
+2. Clone this repository onto your computer.
+
+3. Change into the `docker/` directory.
+
+4. Run:
 
     ```shellsession
     $ ./build-docker
     ```
 
-    The command starts up a virtual Linux-based computer running inside your
-    computer. It then installs a bunch of software useful for Chickadee on
-    that environment, then takes a snapshot of the running environment. (The
-    snapshot is named `cs2620:latest`.) Once the snapshot is created, it’ll
-    take just a second or so for Docker to restart it.
+    This builds a snapshot named `cs286:latest`. It will take a while the
+    first time (downloading PyTorch adds a few minutes); subsequent builds
+    reuse cached layers and are much faster.
 
-We may need to change the Docker image during the term. If we do, you’ll
-update your repository to get the latest Dockerfile, then re-run the
-`./build-docker` command from Step 4. However, later runs should be
-faster since they’ll take advantage of your previous work.
+> If `./build-docker` fails with packages missing or out of date, try
+> `./build-docker --no-cache` instead.
 
-> `./build-docker` is a wrapper around `docker build`. On x86-64 hosts, it runs
-> `docker build -t cs2620:latest -f Dockerfile --platform linux/amd64 .`
->
-> If `./build-docker` fails with a message about packages being missing or out
-> of date, try `./build-docker --no-cache` instead.
-{.note}
+## Running the container
 
-## Running the Docker image by script
+### By hand
 
-The handout repository contains a `run-docker` script that provides good
-arguments and boots Docker into a view of the current directory. We will
-update this script throughout the term.
-
-For example, here’s an example of running our Docker image on a Mac OS X host.
-At first, `uname` (a program that prints the name of the currently running
-operating system) reports `Darwin`. But after `./run-docker` connects the
-terminal to a Linux virtual machine, `uname` reports `Linux`. At the end of
-the example, `exit` quits the Docker environment and returns the terminal to
-Mac OS X.
+Mount the repo root into the container so your edits are immediately visible:
 
 ```shellsession
-$ cd ~/cs2620-s26-psets-YOURNAME
-$ uname
-Darwin
-$ uname -a
-Darwin Eddies-MacBook-Pro.local 20.6.0 Darwin Kernel Version 20.6.0: Wed Jun 23 00:26:27 PDT 2021; root:xnu-7195.141.2~5/RELEASE_ARM64_T8101 arm64
-$ ./run-docker
-cs61-user@a47f05ea5085:~/cs2620$ uname
-Linux
-cs61-user@a47f05ea5085:~/cs2620$ uname -a
-Linux 8006bb91a43b 6.10.4-linuxkit #1 SMP PREEMPT_DYNAMIC Mon Aug 12 08:48:58 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
-cs61-user@a47f05ea5085:~/cs2620$ ls
-docker  pset1  README.md  run-docker
-cs61-user@a47f05ea5085:~/cs2620$ exit
-exit
-$ 
+$ docker run -it --rm -v ~/path/to/multi-lvl-comms:/home/cs286-user/multi-lvl-comms cs286:latest
 ```
 
-A prompt like `cs61-user@a47f05ea5085:~$` means that your terminal is
-connected to the VM. (The `a47f05ea5085` part is a unique identifier for this
-running VM.) You can execute any Linux commands you want. To escape from the
-VM, type Control-D or run the `exit` command.
-
-The script assumes your Docker container is named `cs2620:latest`.
-
-
-### Running our Docker image by hand
-
-If you don’t want to use the script, use a command like the following.
+Then inside the container:
 
 ```shellsession
-$ docker run -it --rm -v ~/cs2620-s26-psets-YOURNAME:/home/cs61-user/cs2620 cs2620:latest
+cs286-user@a47f05ea5085:~$ cd multi-lvl-comms
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ python3 train.py --episodes 5
+ep    0 | R=  64.45 | wm=8.6996  v=57.4526  π=-0.0000
+...
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ cd robot_sim && make
+...
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ cs61-docker-version
+25-cs286
+cs286-user@a47f05ea5085:~/multi-lvl-comms$ exit
+exit
+$
 ```
 
-Explanation:
+A prompt like `cs286-user@a47f05ea5085:~$` means your terminal is connected to
+the Linux VM. Type Control-D or `exit` to leave.
 
-* `docker run` tells Docker to start a new virtual machine.
-* `-it` says Docker should run interactively (`-i`) using a terminal (`-t`).
-* `--rm` says Docker should remove the virtual machine when it is done.
-* `-v LOCALDIR:LINUXDUR` says Docker should share a directory between your
-  host and the Docker virtual machine. Here, I’ve asked for the host’s
-  `~/cs2620-s26-psets-YOURNAME` directory to be mapped inside the virtual
-  machine onto the `/home/cs61-user/cs2620` directory, which is the virtual
-  machine user’s `~/cs2620` directory.
-* `cs2620:latest` names the Docker image to run (namely, the one you built).
+### Flags explained
 
-Here’s an example session:
+* `docker run` — start a new container
+* `-it` — interactive (`-i`) with a terminal (`-t`)
+* `--rm` — remove the container when it exits
+* `-v LOCALDIR:LINUXDIR` — share a directory between host and container;
+  edits on either side are immediately visible to the other
+* `cs286:latest` — the image built by `./build-docker`
+
+### Using a custom tag
 
 ```shellsession
-$ docker run -it --rm -v ~/cs2620-psets:/home/cs61-user/cs2620 cs2620:latest
-cs61-user@a15e6c4c8dbe:~$ ls
-cs2620
-cs61-user@a15e6c4c8dbe:~$ echo "Hello, world"
-Hello, world
-cs61-user@a15e6c4c8dbe:~$ cs61-docker-version
-25-cs2620
-cs61-user@a15e6c4c8dbe:~$ exit
-exit
-$ 
+$ ./build-docker --tag myname:latest
+$ docker run -it --rm -v ~/multi-lvl-comms:/home/cs286-user/multi-lvl-comms myname:latest
 ```
 
 [Docker]: https://docker.com/
 [VMware Workstation]: https://www.vmware.com/products/workstation-player.html
 [VMware Fusion]: https://www.vmware.com/products/fusion.html
 [VirtualBox]: https://www.virtualbox.org/
-[repo]: https://github.com/readablesystems/cs2620-s26-psets/

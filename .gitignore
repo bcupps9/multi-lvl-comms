@@ -49,3 +49,4 @@ tags.*
 typescript
 vgcore*
 robot_sim/build/
+__pycache__/
