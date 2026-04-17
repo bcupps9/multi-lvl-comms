@@ -270,6 +270,42 @@ struct inter_replica_msg {
 
 // TODO: may want to make a wrapper for the single body of a inter_replica type
 
+
+// ── SeqComm agent-to-agent messages ──────────────────────────────────────────
+
+// Negotiation round 1: broadcast encoded hidden state to clique
+struct hidden_state_msg {
+    int sender_id;
+    std::vector<float> h;          // e(o_i), length = embed_dim
+};
+
+// Negotiation round 2: broadcast intention value (estimated return)
+struct intention_msg {
+    int sender_id;
+    float intention;
+};
+
+// Launching phase: upper-level agent sends chosen action downward
+struct upper_action_msg {
+    int sender_id;
+    std::vector<float> action;     // a_i sampled from π
+};
+
+// Launching phase: lowest-priority agent in clique triggers environment step
+struct execute_signal {
+    int sender_id;
+    int timestep;
+};
+
+// Single variant for all agent↔agent traffic on one port per agent
+using agent_msg = std::variant<
+    hidden_state_msg,
+    intention_msg,
+    upper_action_msg,
+    execute_signal
+>;
+
+
 // Concepts
 template <typename T>
 concept message_type = std::is_base_of_v<message_base, T>;
@@ -492,6 +528,46 @@ struct formatter<pancy::vr_msg_type, CharT> : formatter<const char*, CharT> {
             return parent::format("RECOVER_OK", ctx);
         }
         return parent::format("UNKNOWN", ctx);
+    }
+};
+
+template <typename CharT>
+struct formatter<pancy::hidden_state_msg, CharT> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    template <typename FormatContext>
+    auto format(const pancy::hidden_state_msg& m, FormatContext& ctx) const {
+        return std::format_to(ctx.out(), "HIDDEN_STATE(from={}, dim={})",
+                              m.sender_id, m.h.size());
+    }
+};
+
+template <typename CharT>
+struct formatter<pancy::intention_msg, CharT> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    template <typename FormatContext>
+    auto format(const pancy::intention_msg& m, FormatContext& ctx) const {
+        return std::format_to(ctx.out(), "INTENTION(from={}, I={:.4f})",
+                              m.sender_id, m.intention);
+    }
+};
+
+template <typename CharT>
+struct formatter<pancy::upper_action_msg, CharT> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    template <typename FormatContext>
+    auto format(const pancy::upper_action_msg& m, FormatContext& ctx) const {
+        return std::format_to(ctx.out(), "UPPER_ACTION(from={}, dim={})",
+                              m.sender_id, m.action.size());
+    }
+};
+
+template <typename CharT>
+struct formatter<pancy::execute_signal, CharT> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    template <typename FormatContext>
+    auto format(const pancy::execute_signal& m, FormatContext& ctx) const {
+        return std::format_to(ctx.out(), "EXECUTE(from={}, t={})",
+                              m.sender_id, m.timestep);
     }
 };
 
