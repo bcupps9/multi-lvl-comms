@@ -26,13 +26,6 @@ if(TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
-# Find xxhash
-find_path(XXHASH_INCLUDE_DIR xxhash.h HINTS /opt/homebrew/include)
-find_library(XXHASH_LIBRARY xxhash HINTS /opt/homebrew/lib)
-
-if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
-    message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
-endif()
 
 add_library(Cotamer OBJECT
     ../cotamer/cotamer.cc
@@ -46,20 +39,19 @@ add_library(Pancy OBJECT
     utils.cc
 )
 
-add_executable(pt-single
-    pt-single.cc
-    $<TARGET_OBJECTS:Cotamer>
-    $<TARGET_OBJECTS:Pancy>
-)
-
-add_executable(pt-backup
-    pt-backup.cc
-    $<TARGET_OBJECTS:Cotamer>
-    $<TARGET_OBJECTS:Pancy>
+add_library(SeqComm OBJECT
+    agent_action.cc
+    gaussian_field_env.cc
 )
 
 add_executable(pt-paxos
     pt-paxos.cc
     $<TARGET_OBJECTS:Cotamer>
     $<TARGET_OBJECTS:Pancy>
+)
+
+add_executable(seqcomm-sim
+    seqcomm_sim.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:SeqComm>
 )
