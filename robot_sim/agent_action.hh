@@ -70,7 +70,8 @@ struct Environment {
     virtual ~Environment() = default;
     virtual void submit_action(int agent_id,
                                std::span<const float> action) = 0;
-    virtual std::pair<std::vector<float>, float>
+    // Async: suspends until all agents have submitted and the env has stepped.
+    virtual cot::task<std::pair<std::vector<float>, float>>
     get_result(int agent_id) = 0;
 };
 
