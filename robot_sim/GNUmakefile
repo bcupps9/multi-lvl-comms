@@ -17,7 +17,7 @@ ifeq ($(V),1)
 cmake_verbose := --verbose
 endif
 
-targets = pt-single pt-backup pt-paxos
+targets = seqcomm-sim
 
 all:
 	cmake -B $(BUILD) $(cmake_build)
