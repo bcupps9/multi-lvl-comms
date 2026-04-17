@@ -1,5 +1,8 @@
 # multi-lvl-comms
 
+
+check the deps that claude has put in for the training script
+
 C++ + Python implementation of **SeqComm** (NeurIPS 2024): multi-agent coordination
 via sequential communication. Agents negotiate a priority order each timestep based
 on estimated future return, then cascade actions from highest to lowest — each agent
