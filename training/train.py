@@ -1,12 +1,17 @@
 """
 SeqComm MAPPO training on GaussianFieldEnv.
 
-Run:
-    python train.py
-    python train.py --episodes 5        # quick smoke test
+Run from the repo root:
+    python -m training.train
+    python -m training.train --episodes 5            # quick smoke test
+    python -m training.train --weights-dir weights/  # save .pt files when done
 """
 
 import argparse
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.optim as optim
 
@@ -22,6 +27,7 @@ from training.train_world_model import (
     world_model_loss,
     value_loss,
     ppo_loss,
+    save_weights,
 )
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
@@ -207,7 +213,7 @@ def update(
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(n_episodes: int = N_EPISODES) -> None:
+def main(n_episodes: int = N_EPISODES, weights_dir: str = "") -> None:
     env = GaussianFieldEnv(GaussianFieldConfig(n_agents=N_AGENTS))
 
     encoder         = ObservationEncoder(OBS_DIM, EMBED_DIM)
@@ -251,9 +257,15 @@ def main(n_episodes: int = N_EPISODES) -> None:
                 f"π={losses['policy']:.4f}"
             )
 
+    if weights_dir:
+        save_weights(encoder, attn_a, attn_w, world_model_net, policy, critic,
+                     weights_dir)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=N_EPISODES)
+    parser.add_argument("--weights-dir", default="",
+                        help="Save TorchScript .pt files here after training")
     args = parser.parse_args()
-    main(args.episodes)
+    main(args.episodes, args.weights_dir)

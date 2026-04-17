@@ -42,3 +42,23 @@ add_executable(seqcomm-sim
     $<TARGET_OBJECTS:Cotamer>
     $<TARGET_OBJECTS:SeqComm>
 )
+
+# ── Trained simulation (requires libtorch) ────────────────────────────────────
+#
+# Provide libtorch via CMAKE_PREFIX_PATH, e.g.:
+#   cmake -B build -DCMAKE_PREFIX_PATH=$(python3 -c \
+#     "import torch; print(torch.utils.cmake_prefix_path)")
+find_package(Torch QUIET)
+if(Torch_FOUND)
+    message(STATUS "libtorch found — building seqcomm-sim-trained")
+    add_executable(seqcomm-sim-trained
+        seqcomm_sim_trained.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:SeqComm>
+    )
+    target_link_libraries(seqcomm-sim-trained ${TORCH_LIBRARIES})
+    target_include_directories(seqcomm-sim-trained PRIVATE ${TORCH_INCLUDE_DIRS})
+else()
+    message(STATUS "libtorch not found — skipping seqcomm-sim-trained")
+    message(STATUS "  hint: cmake -DCMAKE_PREFIX_PATH=\$(python3 -c 'import torch; print(torch.utils.cmake_prefix_path)') ..")
+endif()
