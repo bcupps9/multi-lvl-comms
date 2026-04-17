@@ -32,9 +32,22 @@ add_library(Cotamer OBJECT
     ../cotamer/io.cc
 )
 
+add_library(Pancy OBJECT
+    pancydb.cc
+    client_model.cc
+    lockseq_model.cc
+    utils.cc
+)
+
 add_library(SeqComm OBJECT
     agent_action.cc
     gaussian_field_env.cc
+)
+
+add_executable(pt-paxos
+    pt-paxos.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:Pancy>
 )
 
 add_executable(seqcomm-sim
