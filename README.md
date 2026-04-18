@@ -15,7 +15,8 @@ multi-lvl-comms/
 ├── requirements.txt            Python deps (torch, numpy)
 │
 ├── training/
-│   ├── train.py                Training entry point (run with: python -m training.train)
+│   ├── train.py                Python-only training (run with: python -m training.train)
+│   ├── train_from_cpp.py       Python updater for the C++ ↔ Python training loop
 │   └── train_world_model.py    PyTorch modules, MAPPO losses, GAE, save_weights()
 │
 ├── execution/
@@ -26,9 +27,10 @@ multi-lvl-comms/
 ├── robot_sim/
 │   ├── agent_action.hh/.cc     Agent coroutine tasks + NeuralModels/Environment interfaces
 │   ├── gaussian_field_env.hh/.cc  First test environment (2D Gaussian coverage)
-│   ├── seqcomm_sim.cc          Simulation harness — random stub models (no libtorch needed)
-│   ├── seqcomm_sim_trained.cc  Simulation harness — loads weights/ via LibTorchNeuralModels
+│   ├── seqcomm_sim.cc          Single-episode demo — random stub models (no libtorch needed)
+│   ├── seqcomm_sim_trained.cc  Multi-episode C++ training loop — loads/reloads weights/
 │   ├── libtorch_models.hh      LibTorchNeuralModels: NeuralModels impl backed by .pt files
+│   ├── trajectory_io.hh        Flat binary serializer for std::vector<transition>
 │   ├── netsim.hh               Async channel<T>/port<T> message passing
 │   ├── pancy_msgs.hh           SeqComm message types + std::formatter specialisations
 │   ├── random_source.hh        Seeded RNG with uniform/normal/exponential/hex helpers
@@ -61,45 +63,62 @@ Episode done — transitions: 40  total_reward: 19.380
 `RandomNeuralModels` returns random tensors of the right shapes so the full coroutine
 task graph runs before any real learning is wired in.
 
-### Training and running with learned weights
+### Training with the C++ ↔ Python loop (recommended)
 
 **Step 1 — install Python deps:**
 ```bash
 pip install -r requirements.txt
 ```
 
-**Step 2 — train and export weights:**
+**Step 2 — bootstrap initial weights:**
 ```bash
-python -m training.train --episodes 2000 --weights-dir weights/
-# → writes weights/encoder.pt, attn_a.pt, attn_w.pt,
-#            world_model.pt, policy.pt, critic.pt
+python -m training.train --episodes 100 --save-weights weights/
+# writes weights/encoder.pt, attn_a.pt, attn_w.pt,
+#         world_model.pt, policy.pt, critic.pt, config.json
 ```
 
-**Step 3 — build the trained simulation:**
-
-`pip install torch` bundles C++ libtorch headers/libs inside the Python package at
-`site-packages/torch/`. CMake searches system paths by default and won't find them
-there — the `CMAKE_PREFIX_PATH` flag points it at the right directory.
-`torch.utils.cmake_prefix_path` outputs that path from whichever Python (or venv)
-is active, so activate your venv first, then:
+**Step 3 — build the C++ training harness:**
 
 ```bash
 cmake -B build -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
 cmake --build build --target seqcomm-sim-trained
 ```
 
-If libtorch is not found, CMake skips the `seqcomm-sim-trained` target and prints a
-hint — the stub `seqcomm-sim` still builds normally.
+If libtorch is not found, CMake skips `seqcomm-sim-trained` and prints a hint —
+the stub `seqcomm-sim` still builds normally.
 
-**Step 4 — run:**
+**Step 4 — run the two-process training loop:**
 ```bash
-./build/robot_sim/seqcomm-sim-trained weights/
+# terminal 1 — C++ sim collects trajectories with the real SeqComm protocol
+./build/robot_sim/seqcomm-sim-trained weights/ 2000
+
+# terminal 2 — Python runs MAPPO updates and saves new weights each episode
+python -m training.train_from_cpp weights/
 ```
 
 ```
-SeqComm (trained): 4 agents  T=200  H=5  F=4  obs_dim=27
-Episode done — transitions: 800  total_reward: 312.541
+# C++ output:
+SeqComm C++ training loop: 4 agents  T=200  H=5  F=4  obs_dim=27  episodes=2000
+ep    0  R=   18.34  avg=   18.34  transitions=800  waiting for Python…
+  → weights reloaded
+ep    1  R=   22.10  avg=   20.22  transitions=800  waiting for Python…
+…
+
+# Python output:
+train_from_cpp: watching weights/  obs_dim=27  embed_dim=64  agents=4
+ep    0 | R=  18.34  avg=  18.34 | wm=0.0231  v=0.1842  π=0.0034  (1.2s)
+ep   10 | R=  31.50  avg=  24.11 | wm=0.0198  v=0.1531  π=0.0021  (1.1s)
+…
 ```
+
+### Python-only training (no libtorch required)
+
+```bash
+python -m training.train --episodes 2000 --save-weights weights/
+```
+
+Uses a Python rollout instead of the C++ sim — faster to iterate on architecture
+changes, but doesn't exercise the real concurrent SeqComm protocol.
 
 ---
 
@@ -131,15 +150,69 @@ Each timestep runs two phases across all agents concurrently as cotamer coroutin
 
 ## How training works
 
-We use the python code to get weight to fill out the `RandomNeuralModels` part of the c++. Once we have that we can faithfully run the algorithms from the paper.
+There are two training paths: a Python-only path for quick iteration, and the full
+C++ ↔ Python loop that uses the real concurrent SeqComm protocol for trajectory collection.
+
+### C++ ↔ Python training loop (primary path)
+
+C++ collects trajectories using the real concurrent protocol (coroutines, async message
+passing); Python does the gradient updates. They synchronise via three files in `weights/`:
+
+```
+weights/traj.bin      — flat binary trajectory written by C++ each episode
+weights/traj.ready    — sentinel: C++ touches this when traj.bin is complete
+weights/weights.ready — sentinel: Python touches this when new .pt files are saved
+```
+
+**Run in two terminals:**
+
+```bash
+# terminal 1 — C++ sim (blocks after each episode waiting for Python)
+./build/robot_sim/seqcomm-sim-trained weights/ 2000
+
+# terminal 2 — Python updater (blocks between episodes waiting for C++)
+python -m training.train_from_cpp weights/
+```
+
+Per episode the C++ sim:
+1. Runs one full SeqComm episode with `LibtorchNeuralModels`
+2. Serialises `std::vector<transition>` to `weights/traj.bin` via `trajectory_io.hh`
+3. Touches `weights/traj.ready`
+4. Polls for `weights/weights.ready`, then calls `LibtorchNeuralModels::reload()`
+
+Per episode the Python updater (`training/train_from_cpp.py`):
+1. Polls for `weights/traj.ready`
+2. Reads `traj.bin` with `numpy.frombuffer`, reassembles all-agent tensors by timestep
+3. Runs `compute_gae` + three MAPPO losses
+4. Saves six updated `.pt` files via `save_weights()`
+5. Touches `weights/weights.ready`
+
+**Bootstrap:** run `train.py` once first to create initial weights before starting the loop.
+
+```bash
+python -m training.train --episodes 100 --save-weights weights/
+```
+
+### Trajectory binary format (`trajectory_io.hh`)
+
+```
+header (16 bytes):  int32 n_agents, obs_dim, action_dim, n_transitions
+
+per transition:
+  int32                           agent_id, timestep, n_upper
+  float32[obs_dim]                obs
+  float32[action_dim]             action
+  float32[n_agents * action_dim]  upper_actions  (first n_upper slots filled)
+  float32[obs_dim]                next_obs
+  float32                         reward, value, log_prob, log_prob_old
+```
 
 ### C++ side — trajectory collection
 
-`seqcomm_sim.cc` is the harness. Replace `RandomNeuralModels` with thin wrappers that
-call into libtorch (or load weights exported from the Python trainer), run episodes,
-and serialise the trajectory buffer to disk or pass it to Python via a socket.
+`seqcomm_sim_trained.cc` is the multi-episode training harness.
+`seqcomm_sim.cc` is a single-episode demo with random stub models (no libtorch needed).
 
-The `NeuralModels` interface is the only seam:
+The `NeuralModels` interface is the only seam between the two sides:
 
 ```cpp
 struct NeuralModels {

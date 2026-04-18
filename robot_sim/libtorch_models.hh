@@ -203,6 +203,25 @@ struct LibtorchNeuralModels : NeuralModels {
     }
 
 
+    // Reload all modules from disk — call after Python writes updated weights.
+    void reload(const std::string& weights_dir) {
+        namespace fs = std::filesystem;
+        auto load = [&](const std::string& name) {
+            fs::path p = fs::path(weights_dir) / name;
+            if (!fs::exists(p))
+                throw std::runtime_error("weight file not found: " + p.string());
+            return torch::jit::load(p.string());
+        };
+        encoder_     = load("encoder.pt");
+        attn_a_      = load("attn_a.pt");
+        attn_w_      = load("attn_w.pt");
+        world_model_ = load("world_model.pt");
+        policy_      = load("policy.pt");
+        critic_      = load("critic.pt");
+        encoder_.eval(); attn_a_.eval(); attn_w_.eval();
+        world_model_.eval(); policy_.eval(); critic_.eval();
+    }
+
 private:
     torch::jit::Module encoder_;
     torch::jit::Module attn_a_;
