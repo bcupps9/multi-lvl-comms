@@ -1,8 +1,5 @@
 # multi-lvl-comms
 
-
-check the deps that claude has put in for the training script
-
 C++ + Python implementation of **SeqComm** (NeurIPS 2024): multi-agent coordination
 via sequential communication. Agents negotiate a priority order each timestep based
 on estimated future return, then cascade actions from highest to lowest — each agent
@@ -15,18 +12,27 @@ sees what the agents above it chose before making its own decision.
 ```
 multi-lvl-comms/
 ├── CMakeLists.txt              root cmake — delegates to robot_sim/
-├── train_world_model.py        PyTorch MAPPO losses + GAE (equations 2, 3, 4)
-├── gaussian_field_env.py       Python mirror of the C++ environment
+├── requirements.txt            Python deps (torch, numpy)
+│
+├── training/
+│   ├── train.py                Training entry point (run with: python -m training.train)
+│   └── train_world_model.py    PyTorch modules, MAPPO losses, GAE, save_weights()
+│
+├── execution/
+│   └── gaussian_field_env.py   Python mirror of the C++ environment (used during training)
+│
+├── weights/                    TorchScript .pt files written by train.py (gitignored if large)
 │
 ├── robot_sim/
 │   ├── agent_action.hh/.cc     Agent coroutine tasks + NeuralModels/Environment interfaces
 │   ├── gaussian_field_env.hh/.cc  First test environment (2D Gaussian coverage)
-│   ├── seqcomm_sim.cc          Simulation harness with random stub neural models
+│   ├── seqcomm_sim.cc          Simulation harness — random stub models (no libtorch needed)
+│   ├── seqcomm_sim_trained.cc  Simulation harness — loads weights/ via LibTorchNeuralModels
+│   ├── libtorch_models.hh      LibTorchNeuralModels: NeuralModels impl backed by .pt files
 │   ├── netsim.hh               Async channel<T>/port<T> message passing
 │   ├── pancy_msgs.hh           SeqComm message types + std::formatter specialisations
 │   ├── random_source.hh        Seeded RNG with uniform/normal/exponential/hex helpers
-│   ├── utils.hh                randomly_seeded<> + durational concept (used by random_source)
-│   └── print                   <print> shim for GCC 13 (std::format backend)
+│   └── utils.hh                randomly_seeded<> + durational concept
 │
 └── cotamer/                    C++23 coroutine framework (task, event, after, loop)
 ```
@@ -34,6 +40,8 @@ multi-lvl-comms/
 ---
 
 ## Build and run
+
+### Stub simulation (no libtorch needed)
 
 ```bash
 cmake -B build
@@ -50,8 +58,48 @@ SeqComm: 4 agents, T=10 H=3 F=4 obs_dim=27
 Episode done — transitions: 40  total_reward: 19.380
 ```
 
-The stub models (`RandomNeuralModels` in `seqcomm_sim.cc`) return random tensors of the
-right shapes so the full coroutine task graph runs before any real learning is wired in.
+`RandomNeuralModels` returns random tensors of the right shapes so the full coroutine
+task graph runs before any real learning is wired in.
+
+### Training and running with learned weights
+
+**Step 1 — install Python deps:**
+```bash
+pip install -r requirements.txt
+```
+
+**Step 2 — train and export weights:**
+```bash
+python -m training.train --episodes 2000 --weights-dir weights/
+# → writes weights/encoder.pt, attn_a.pt, attn_w.pt,
+#            world_model.pt, policy.pt, critic.pt
+```
+
+**Step 3 — build the trained simulation:**
+
+`pip install torch` bundles C++ libtorch headers/libs inside the Python package at
+`site-packages/torch/`. CMake searches system paths by default and won't find them
+there — the `CMAKE_PREFIX_PATH` flag points it at the right directory.
+`torch.utils.cmake_prefix_path` outputs that path from whichever Python (or venv)
+is active, so activate your venv first, then:
+
+```bash
+cmake -B build -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
+cmake --build build --target seqcomm-sim-trained
+```
+
+If libtorch is not found, CMake skips the `seqcomm-sim-trained` target and prints a
+hint — the stub `seqcomm-sim` still builds normally.
+
+**Step 4 — run:**
+```bash
+./build/robot_sim/seqcomm-sim-trained weights/
+```
+
+```
+SeqComm (trained): 4 agents  T=200  H=5  F=4  obs_dim=27
+Episode done — transitions: 800  total_reward: 312.541
+```
 
 ---
 
@@ -82,6 +130,8 @@ Each timestep runs two phases across all agents concurrently as cotamer coroutin
 ---
 
 ## How training works
+
+We use the python code to get weight to fill out the `RandomNeuralModels` part of the c++. Once we have that we can faithfully run the algorithms from the paper.
 
 ### C++ side — trajectory collection
 
@@ -138,7 +188,7 @@ L_π = −mean min(ρ·A,  clip(ρ, 1±ε)·A)
 ### Training loop (Python-only path, no libtorch required)
 
 ```python
-env = GaussianFieldEnv()          # gaussian_field_env.py
+env = GaussianFieldEnv()          # execution/gaussian_field_env.py
 
 for episode in range(N_EPISODES):
     obs = env.reset()

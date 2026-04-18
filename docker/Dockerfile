@@ -95,6 +95,20 @@ RUN apt-get -y install\
     linux-tools-common\
     linux-tools-generic
 
+# install Python and pip for the SeqComm training stack
+RUN apt-get update &&\
+ apt-get -y install\
+ python3\
+ python3-pip\
+ python3-venv
+
+# install Python deps from the repo's requirements.txt
+# CPU-only torch wheel — no CUDA needed inside the container
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --break-system-packages \
+    --index-url https://download.pytorch.org/whl/cpu \
+    -r /tmp/requirements.txt
+
 # set up default locale
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
@@ -103,13 +117,13 @@ ENV EDITOR=nano
 # remove unneeded .deb files
 # RUN rm -r /var/lib/apt/lists/*
 
-# set up passwordless sudo for user cs61-user
+# set up passwordless sudo for user cs286-user
 ARG UID=1001
-RUN useradd -m -s /bin/bash -u "${UID}" cs61-user &&\
- echo "cs61-user ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/cs61-init
+RUN useradd -m -s /bin/bash -u "${UID}" cs286-user &&\
+ echo "cs286-user ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/cs286-init
 
 # create binary reporting version of dockerfile
-RUN (echo '#\!/bin/sh'; echo 'echo 25-cs2620') > /usr/bin/cs61-docker-version; chmod ugo+rx,u+w,go-w /usr/bin/cs61-docker-version
+RUN (echo '#\!/bin/sh'; echo 'echo 25-cs286') > /usr/bin/cs61-docker-version; chmod ugo+rx,u+w,go-w /usr/bin/cs61-docker-version
 
 # git build arguments
 ARG USER=CS61\ User
@@ -123,7 +137,7 @@ RUN test -z "`which c++`" && ln -s g++-15 /usr/bin/c++;\
  test -z "`which lldb`" && ln -s lldb-21 /usr/bin/lldb
 
 # configure your environment
-USER cs61-user
+USER cs286-user
 RUN git config --global user.name "${USER}" &&\
  git config --global user.email "${EMAIL}" &&\
  git config --global safe.directory "*" &&\
@@ -132,14 +146,14 @@ RUN git config --global user.name "${USER}" &&\
  cat /dev/null > ~/.bash_profile &&\
  echo "# 2022: avoid a Docker bug with user mapping by listing working directory" >> ~/.bash_profile &&\
  echo "ls -al > /dev/null" >> ~/.bash_profile &&\
- echo "for i in \`mount | grep /home/cs61-user | sed 's/^.*\\(\\/home[^ ]*\\).*/\\\\1/'\`; do ls -al \$i > /dev/null; done" >> ~/.bash_profile &&\
+ echo "for i in \`mount | grep /home/cs286-user | sed 's/^.*\\(\\/home[^ ]*\\).*/\\\\1/'\`; do ls -al \$i > /dev/null; done" >> ~/.bash_profile &&\
  echo "# make ssh-auth.sock user-readable" >> ~/.bash_profile &&\
- (echo "if test -e /run/host-services/ssh-auth.sock; then"; echo "  sudo chown cs61-user:cs61-user /run/host-services/ssh-auth.sock"; echo "fi") >> ~/.bash_profile &&\
+ (echo "if test -e /run/host-services/ssh-auth.sock; then"; echo "  sudo chown cs286-user:cs286-user /run/host-services/ssh-auth.sock"; echo "fi") >> ~/.bash_profile &&\
  echo ". ~/.bashrc" >> ~/.bash_profile &&\
  rm -f ~/.bash_logout &&\
  echo "add-auto-load-safe-path ~" > ~/.gdbinit
 
-WORKDIR /home/cs61-user
+WORKDIR /home/cs286-user
 CMD ["/bin/bash", "-l"]
 
 # Initial version of this Dockerfile by Todd Morrill, CS 61 DCE student

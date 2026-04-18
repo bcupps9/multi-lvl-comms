@@ -14,6 +14,8 @@ Network parameters:
 All five modules are trained jointly from trajectory data D = {tau_k}.
 """
 
+import math
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -94,10 +96,38 @@ class Policy(nn.Module):
         self.mean = nn.Linear(embed_dim, action_dim)
         self.log_std = nn.Parameter(torch.zeros(action_dim))
 
+    @torch.jit.ignore
     def forward(self, context: torch.Tensor):
+        # Returns a Normal distribution for Python training.
+        # Ignored by TorchScript — use sample() / log_prob_of() from C++.
         mean = self.mean(context)
         std = self.log_std.exp().expand_as(mean)
         return torch.distributions.Normal(mean, std)
+
+    @torch.jit.export
+    def sample(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample an action and return (action, log_prob). TorchScript-safe."""
+        mean = self.mean(context)
+        std  = self.log_std.exp().expand_as(mean)
+        action = mean + std * torch.randn_like(mean)
+        log_prob = (
+            -0.5 * math.log(2.0 * math.pi)
+            - std.log()
+            - 0.5 * ((action - mean) / std).pow(2)
+        ).sum(-1)
+        return action, log_prob
+
+    @torch.jit.export
+    def log_prob_of(self, context: torch.Tensor,
+                    action: torch.Tensor) -> torch.Tensor:
+        """Log-probability of a given action under this policy."""
+        mean = self.mean(context)
+        std  = self.log_std.exp().expand_as(mean)
+        return (
+            -0.5 * math.log(2.0 * math.pi)
+            - std.log()
+            - 0.5 * ((action - mean) / std).pow(2)
+        ).sum(-1)
 
 
 class Critic(nn.Module):
@@ -340,3 +370,28 @@ def train_step(
     opt_policy.step()
 
     return {"world_model": lw.item(), "value": lv.item(), "policy": lp.item()}
+
+
+# ── Weight export ──────────────────────────────────────────────────────────────
+
+def save_weights(
+    encoder: ObservationEncoder,
+    attn_a: AttentionModule,
+    attn_w: AttentionModule,
+    world_model_net: WorldModel,
+    policy: Policy,
+    critic: Critic,
+    weights_dir: str = "weights",
+) -> None:
+    """
+    Export all six modules as TorchScript (.pt) files loadable by libtorch.
+    Call this after training; the C++ seqcomm-sim-trained binary reads them.
+    """
+    os.makedirs(weights_dir, exist_ok=True)
+    torch.jit.script(encoder).save(os.path.join(weights_dir, "encoder.pt"))
+    torch.jit.script(attn_a).save(os.path.join(weights_dir, "attn_a.pt"))
+    torch.jit.script(attn_w).save(os.path.join(weights_dir, "attn_w.pt"))
+    torch.jit.script(world_model_net).save(os.path.join(weights_dir, "world_model.pt"))
+    torch.jit.script(policy).save(os.path.join(weights_dir, "policy.pt"))
+    torch.jit.script(critic).save(os.path.join(weights_dir, "critic.pt"))
+    print(f"Weights saved → {os.path.abspath(weights_dir)}")

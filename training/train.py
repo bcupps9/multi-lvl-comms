@@ -37,6 +37,7 @@ from training.train_world_model import (
     world_model_loss,
     value_loss,
     ppo_loss,
+    save_weights,
 )
 
 # ── Fixed hyperparameters (env-independent) ────────────────────────────────────
