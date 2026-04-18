@@ -1,5 +1,7 @@
 #include "agent_action.hh"
 #include "gaussian_field_env.hh"
+#include "intersection_env.hh"
+#include "libtorch_models.hh"
 #include "cotamer/cotamer.hh"
 #include "netsim.hh"
 #include "pancy_msgs.hh"
@@ -7,19 +9,25 @@
 #include <list>
 #include <memory>
 #include <print>
+#include <string>
 #include <vector>
 
 // seqcomm_sim.cc
 //
 //   Simulation harness for SeqComm on GaussianFieldEnv.
 //
-//   RandomNeuralModels is a stub that returns random tensors so the
-//   cotamer task flow can be exercised end-to-end before plugging in
-//   libtorch implementations.
+//   Two model back-ends:
+//     RandomNeuralModels (default) — random tensors; validates coroutine flow.
+//     LibtorchNeuralModels         — loads TorchScript weights from disk.
 //
 //   Usage:
 //     cmake -B build && cmake --build build --target seqcomm-sim
-//     ./build/seqcomm-sim
+//     ./build/robot_sim/seqcomm-sim                           # random models
+//
+//   With libtorch (train first: python training/train.py --save-weights weights/):
+//     cmake -B build -DUSE_TORCH=ON -DCMAKE_PREFIX_PATH=/path/to/libtorch
+//     cmake --build build --target seqcomm-sim
+//     ./build/robot_sim/seqcomm-sim --weights ./weights
 
 namespace cot = cotamer;
 using namespace seqcomm;
@@ -90,31 +98,81 @@ struct RandomNeuralModels : NeuralModels {
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 
-int main() {
+int main(int argc, char* argv[]) {
     constexpr int N = 4;    // agents
     constexpr int T = 10;   // timesteps per episode
     constexpr int H = 3;    // world-model rollout horizon for intention
     constexpr int F = 4;    // sampled orderings per intention estimate
 
+    // Parse flags: --weights <dir>  --env <gaussian|intersection>
+    std::string weights_dir;
+    std::string env_name = "gaussian";
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--weights" && i + 1 < argc)
+            weights_dir = argv[++i];
+        else if (std::string(argv[i]) == "--env" && i + 1 < argc)
+            env_name = argv[++i];
+    }
+
     random_source rng;
 
-    // Environment
-    GaussianFieldEnv::Config env_cfg;
-    env_cfg.n_agents = N;
-    GaussianFieldEnv env(env_cfg, rng);
+    // Environment — choose at runtime; query dims before erasing the type.
+    int obs_dim_val, action_dim_val;
+    std::unique_ptr<Environment> env_ptr;
+    std::vector<std::vector<float>> init_obs;
+
+    if (env_name == "intersection") {
+        IntersectionCrossingEnv::Config cfg;
+        cfg.n_agents = N;
+        auto e = std::make_unique<IntersectionCrossingEnv>(cfg);
+        obs_dim_val    = e->obs_dim();
+        action_dim_val = e->action_dim();
+        init_obs       = e->reset();
+        env_ptr        = std::move(e);
+    } else {
+        if (env_name != "gaussian")
+            std::print("Warning: unknown --env '{}', defaulting to gaussian\n", env_name);
+        GaussianFieldEnv::Config cfg;
+        cfg.n_agents = N;
+        auto e = std::make_unique<GaussianFieldEnv>(cfg, rng);
+        obs_dim_val    = e->obs_dim();
+        action_dim_val = e->action_dim();
+        init_obs       = e->reset();
+        env_ptr        = std::move(e);
+    }
+    Environment& env = *env_ptr;
 
     // Shared trajectory buffer (filled by all agents during the episode)
     std::vector<transition> trajectory;
 
-    // Neural models (stub — swap in libtorch implementations here)
-    RandomNeuralModels models(rng, env.obs_dim(), N);
+    // Neural models — choose back-end at runtime.
+    //
+    // unique_ptr<NeuralModels> lets both branches share the rest of the
+    // harness without duplicating agent construction or the event loop.
+    std::unique_ptr<NeuralModels> models_ptr;
+
+#ifdef USE_TORCH
+    if (!weights_dir.empty()) {
+        std::print("Loading TorchScript weights from '{}'\n", weights_dir);
+        models_ptr = std::make_unique<LibtorchNeuralModels>(weights_dir, N);
+    } else {
+        std::print("USE_TORCH enabled but no --weights given; using random models\n");
+        models_ptr = std::make_unique<RandomNeuralModels>(rng, obs_dim_val, N);
+    }
+#else
+    if (!weights_dir.empty())
+        std::print("Warning: --weights ignored (build with -DUSE_TORCH=ON to enable)\n");
+    models_ptr = std::make_unique<RandomNeuralModels>(rng, obs_dim_val, N);
+#endif
+
+    NeuralModels& models = *models_ptr;
 
     // Agents — stored in a vector of unique_ptr so ports are never moved
     std::vector<std::unique_ptr<Agent>> agents;
     agents.reserve(N);
     for (int i = 0; i < N; ++i)
         agents.push_back(std::make_unique<Agent>(
-            i, env.obs_dim(), env.action_dim(),
+            i, obs_dim_val, action_dim_val,
             models, env, trajectory, rng));
 
     // Clique: fully connected (all agents in one neighbourhood).
@@ -136,12 +194,11 @@ int main() {
     }
 
     // Seed initial observations from the environment
-    auto init_obs = env.reset();
     for (int i = 0; i < N; ++i)
         agents[i]->obs = init_obs[i];
 
-    std::print("SeqComm: {} agents, T={} H={} F={} obs_dim={}\n",
-               N, T, H, F, env.obs_dim());
+    std::print("SeqComm [{}]: {} agents, T={} H={} F={} obs_dim={}\n",
+               env_name, N, T, H, F, obs_dim_val);
 
     // Launch all agents as independent cotamer tasks and run the event loop
     for (auto& a : agents)

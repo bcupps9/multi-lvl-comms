@@ -64,7 +64,8 @@ class AttentionModule(nn.Module):
         h_exp = h_self.unsqueeze(1).expand(-1, n, -1)
         x = torch.cat([h_exp, messages], dim=-1)   # (batch, n, embed+msg)
         x = self.input_proj(x)                      # (batch, n, embed)
-        attn_out, _ = self.attn(x, x, x)           # (batch, n, embed)
+        # Index [0] instead of tuple-unpack so torch.jit.script is happy
+        attn_out = self.attn(x, x, x)[0]           # (batch, n, embed)
         context = attn_out.mean(dim=1)              # (batch, embed)
         return self.out_proj(context)
 
@@ -142,6 +143,34 @@ class Critic(nn.Module):
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         return self.net(context).squeeze(-1)
+
+
+class ScriptablePolicy(nn.Module):
+    """
+    TorchScript-compatible wrapper around Policy.
+
+    torch.distributions.Normal cannot be exported to TorchScript, so this
+    module returns (mean, log_std_expanded) as plain tensors.  The C++ side
+    uses these to sample:  action = mean + exp(log_std) * randn_like(mean)
+    and to compute log_prob analytically.
+
+    Usage:
+        sp = ScriptablePolicy(policy)
+        scripted = torch.jit.script(sp)
+        scripted.save("weights/policy.pt")
+    """
+
+    def __init__(self, policy: "Policy"):
+        super().__init__()
+        self.mean_layer = policy.mean
+        self.log_std = policy.log_std
+
+    def forward(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # context: (batch, embed_dim)
+        # returns: mean (batch, action_dim), log_std (batch, action_dim)
+        mean = self.mean_layer(context)
+        log_std = self.log_std.expand_as(mean)
+        return mean, log_std
 
 
 # ── Loss functions ─────────────────────────────────────────────────────────────
