@@ -11,11 +11,12 @@ namespace seqcomm {
 Agent::Agent(int id, int obs_dim, int action_dim,
              NeuralModels& models, Environment& env,
              std::vector<transition>& trajectory,
-             random_source& rng)
+             random_source& rng,
+             bool verbose)
     : id(id), obs_dim(obs_dim), action_dim(action_dim),
       from_agents(rng, "agent-" + std::to_string(id)),
       models(models), env(env), trajectory(trajectory),
-      rng_(rng) {}
+      verbose(verbose), rng_(rng) {}
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,10 +159,12 @@ cot::task<void> Agent::negotiation_phase(int t, int H, int F) {
             N_lower.push_back(msg.sender_id);
     }
 
-    float t_sec = std::chrono::duration<float>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    std::print("{:.3f}: agent {} t={} N_upper={} N_lower={}\n",
-               t_sec, id, t, N_upper.size(), N_lower.size());
+    if (verbose) {
+        float t_sec = std::chrono::duration<float>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::print("{:.3f}: agent {} t={} N_upper={} N_lower={}\n",
+                   t_sec, id, t, N_upper.size(), N_lower.size());
+    }
 }
 
 

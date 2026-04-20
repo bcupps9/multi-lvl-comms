@@ -69,7 +69,8 @@ static float run_one_episode(
     GaussianFieldEnv& env,
     LibtorchNeuralModels& models,
     random_source& rng,
-    std::vector<transition>& trajectory)
+    std::vector<transition>& trajectory,
+    bool verbose)
 {
     trajectory.clear();
 
@@ -78,7 +79,7 @@ static float run_one_episode(
     for (int i = 0; i < N; ++i)
         agents.push_back(std::make_unique<Agent>(
             i, env.obs_dim(), ACTION_DIM,
-            models, env, trajectory, rng));
+            models, env, trajectory, rng, verbose));
 
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < N; ++j)
@@ -114,14 +115,23 @@ static float run_one_episode(
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::print(stderr,
-            "usage: seqcomm-sim-trained <weights_dir> [n_episodes]\n"
+            "usage: seqcomm-sim-trained <weights_dir> [n_episodes] [--verbose]\n"
             "  weights_dir: directory with .pt files written by train.py\n"
-            "  n_episodes:  default 2000\n");
+            "  n_episodes:  default 2000\n"
+            "  --verbose:   print per-timestep agent ordering\n"
+            "  OMP_NUM_THREADS=N controls libtorch CPU thread count\n");
         return 1;
     }
 
     const std::string weights_dir = argv[1];
-    const int n_episodes = (argc >= 3) ? std::stoi(argv[2]) : 2000;
+    int  n_episodes = 2000;
+    bool verbose    = false;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--verbose") verbose    = true;
+        else                    n_episodes = std::stoi(arg);
+    }
 
     random_source rng;
 
@@ -137,6 +147,7 @@ int main(int argc, char* argv[]) {
     const fs::path traj_bin   = fs::path(weights_dir) / "traj.bin";
     const fs::path traj_ready = fs::path(weights_dir) / "traj.ready";
     const fs::path wts_ready  = fs::path(weights_dir) / "weights.ready";
+    const fs::path traj_done  = fs::path(weights_dir) / "traj.done";
 
     std::print("SeqComm C++ training loop: {} agents  T={}  H={}  F={}  "
                "obs_dim={}  episodes={}\n",
@@ -148,7 +159,7 @@ int main(int argc, char* argv[]) {
     float reward_sum = 0.f;
 
     for (int ep = 0; ep < n_episodes; ++ep) {
-        float ep_reward = run_one_episode(env, models, rng, trajectory);
+        float ep_reward = run_one_episode(env, models, rng, trajectory, verbose);
         reward_sum += ep_reward;
 
         // Serialize trajectory and signal Python
@@ -172,6 +183,7 @@ int main(int argc, char* argv[]) {
         std::print("  → weights reloaded\n");
     }
 
+    touch(traj_done);
     std::print("\nDone. {} episodes  avg_reward={:.2f}\n",
                n_episodes, reward_sum / n_episodes);
     return 0;

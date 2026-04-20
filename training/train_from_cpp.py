@@ -256,9 +256,15 @@ def main(weights_dir: str) -> None:
     ep = 0
     reward_history = []
 
+    traj_done = os.path.join(weights_dir, 'traj.done')
+
     while True:
-        # Wait for C++ to finish an episode
+        # Wait for C++ to finish an episode (or signal it's done)
         while not os.path.exists(traj_ready):
+            if os.path.exists(traj_done):
+                print(f"\nC++ sim finished after {ep} episodes.")
+                os.remove(traj_done)
+                return
             time.sleep(POLL_INTERVAL)
 
         t0 = time.time()
