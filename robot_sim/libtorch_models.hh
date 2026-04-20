@@ -94,8 +94,18 @@ struct LibtorchNeuralModels : NeuralModels {
         const std::vector<std::vector<float>>& messages) override
     {
         torch::NoGradGuard ng;
-        auto h_t    = span_to_tensor(h_self).unsqueeze(0);      // (1, embed_dim)
-        auto msgs_t = vecs_to_tensor(messages).unsqueeze(0);    // (1, n, msg_dim)
+        auto h_t = span_to_tensor(h_self).unsqueeze(0);         // (1, embed_dim)
+
+        // Python training always passes (1, n_agents, action_dim) zero-padded
+        // tensors regardless of how many upper agents actually acted.
+        // Match that layout so the scripted module sees the expected input shape.
+        int msg_dim = messages.empty() ? action_dim_
+                                       : static_cast<int>(messages[0].size());
+        auto msgs_t = torch::zeros({1, n_agents_, msg_dim});
+        for (int i = 0; i < static_cast<int>(messages.size()); ++i)
+            for (int j = 0; j < msg_dim; ++j)
+                msgs_t[0][i][j] = messages[i][j];
+
         auto ctx = attn_a_.forward({h_t, msgs_t}).toTensor().squeeze(0);
         return tensor_to_vec(ctx);
     }

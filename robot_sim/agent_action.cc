@@ -158,7 +158,8 @@ cot::task<void> Agent::negotiation_phase(int t, int H, int F) {
             N_lower.push_back(msg.sender_id);
     }
 
-    float t_sec = std::chrono::duration<float>(cot::now().time_since_epoch()).count();
+    float t_sec = std::chrono::duration<float>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
     std::print("{:.3f}: agent {} t={} N_upper={} N_lower={}\n",
                t_sec, id, t, N_upper.size(), N_lower.size());
 }

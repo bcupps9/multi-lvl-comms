@@ -50,7 +50,7 @@ from training.train_world_model import (
 from training.train import save_weights, N_AGENTS, EMBED_DIM, ACTION_DIM
 from training.train import H, F, GAMMA, LAM, CLIP_EPS, LR_WORLD, LR_POLICY, LOG_EVERY
 
-POLL_INTERVAL = 0.05   # seconds between sentinel checks
+POLL_INTERVAL = 0.05   # seconds between sentinel checks - we should/could set up a sigint?
 
 
 # ── Binary reader ─────────────────────────────────────────────────────────────

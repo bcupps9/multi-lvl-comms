@@ -50,3 +50,5 @@ typescript
 vgcore*
 robot_sim/build/
 __pycache__/
+libtorch/
+.venv/

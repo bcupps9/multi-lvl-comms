@@ -87,6 +87,12 @@ cmake --build build --target seqcomm-sim-trained
 If libtorch is not found, CMake skips `seqcomm-sim-trained` and prints a hint —
 the stub `seqcomm-sim` still builds normally.
 
+> **macOS only:** libtorch's prebuilt binaries require the LLVM OpenMP runtime.
+> If you see `Library not loaded: /opt/llvm-openmp/lib/libomp.dylib` at runtime, install it:
+> ```bash
+> brew install libomp
+> ```
+
 **Step 4 — run the two-process training loop:**
 ```bash
 # terminal 1 — C++ sim collects trajectories with the real SeqComm protocol

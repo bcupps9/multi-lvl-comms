@@ -44,7 +44,7 @@ add_executable(seqcomm-sim
     $<TARGET_OBJECTS:SeqComm>
 )
 
-# ── Optional: link libtorch for real neural model inference ───────────────────
+# ── Optional: seqcomm-sim-trained (requires libtorch) ────────────────────────
 #
 # Enable with:
 #   cmake -B build -DUSE_TORCH=ON -DCMAKE_PREFIX_PATH=/path/to/libtorch
@@ -53,13 +53,17 @@ add_executable(seqcomm-sim
 # (select LibTorch, C++/Java, your platform, same version as your Python torch)
 #
 # Once built:
-#   ./build/robot_sim/seqcomm-sim --weights ./weights
-option(USE_TORCH "Link against libtorch to run trained TorchScript models" OFF)
+#   ./build/robot_sim/seqcomm-sim-trained --weights ./weights
+option(USE_TORCH "Build seqcomm-sim-trained with libtorch" OFF)
 if(USE_TORCH)
     find_package(Torch REQUIRED)
-    target_compile_definitions(seqcomm-sim PRIVATE USE_TORCH)
-    target_link_libraries(seqcomm-sim "${TORCH_LIBRARIES}")
-    # libtorch requires C++17 ABI; the project already uses C++23 which is fine.
-    set_property(TARGET seqcomm-sim PROPERTY CXX_STANDARD 23)
-    message(STATUS "libtorch found — LibtorchNeuralModels enabled")
+    add_executable(seqcomm-sim-trained
+        seqcomm_sim_trained.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:SeqComm>
+    )
+    target_compile_definitions(seqcomm-sim-trained PRIVATE USE_TORCH)
+    target_link_libraries(seqcomm-sim-trained "${TORCH_LIBRARIES}")
+    set_property(TARGET seqcomm-sim-trained PROPERTY CXX_STANDARD 23)
+    message(STATUS "libtorch found — seqcomm-sim-trained enabled")
 endif()
