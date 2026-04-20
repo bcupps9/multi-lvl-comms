@@ -124,9 +124,26 @@ changes, but doesn't exercise the real concurrent SeqComm protocol.
 Key flags:
 - `--env`          — `gaussian`, `coverage`, or `intersection` (default: gaussian)
 - `--mode`         — ablation variant (default: `seqcomm`); see table below
-- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>_seed<N>.jsonl`
+- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>[_<comm>]_seed<N>.jsonl`
 - `--seed N`       — fix torch + Python RNG for reproducible runs
 - `--save-every N` — checkpoint weights every N episodes in addition to the final save
+
+Communication stressor flags (all default to perfect/lossless):
+- `--comm-delay N`  — message arrives N steps late; first N steps see zeros
+- `--comm-drop P`   — each message is independently dropped with probability P
+- `--comm-noise S`  — additive Gaussian noise with std S on every received tensor
+- `--comm-bits B`   — quantise messages to 2^B uniform levels (0 = full float32)
+
+Stressors can be combined. The comm tag is appended to the log filename only when at
+least one stressor is active, e.g. `intersection_seqcomm_delay2_drop0.3_seed0.jsonl`.
+
+Example — seqcomm under 30% packet drop:
+```bash
+python3 -m training.train \
+  --env intersection --mode seqcomm --seed 0 \
+  --episodes 2000 --log-dir logs/ \
+  --comm-drop 0.3
+```
 
 ### Ablation modes
 
@@ -163,6 +180,7 @@ When `--log-dir` is set, each episode appends one JSON record to the log file:
   "deadlock": false,
   "n_collisions": 2,
   "n_goals_reached": 4,
+  "n_msgs_dropped": 7,
   "order_entropy": 1.23,
   "mean_intention_spread": 0.45,
   "first_mover_counts": [12, 8, 15, 65],
