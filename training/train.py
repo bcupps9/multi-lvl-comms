@@ -22,6 +22,7 @@ import math
 import os
 import random
 import time
+from dataclasses import dataclass
 import torch
 import torch.optim as optim
 
@@ -58,6 +59,29 @@ CLIP_EPS    = 0.2
 LR_WORLD    = 3e-4
 LR_POLICY   = 3e-4
 LOG_EVERY   = 10
+
+# ── Ablation modes ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ModeConfig:
+    compute_intention: bool  # run world-model rollout to score agents (Algorithm 5)
+    share_actions: bool      # pass actual upper-level actions in launching phase
+    ordering: str            # "intention" | "random" | "fixed"
+
+# Each variant isolates one design choice from the full SeqComm algorithm:
+#   seqcomm          — full paper method (both phases active)
+#   mappo            — plain MAPPO: no communication, fixed order, no shared actions
+#   seqcomm_random   — share actions but pick order randomly (no intention negotiation)
+#   seqcomm_no_action— negotiate order via intentions but don't share actual actions
+#   seqcomm_fixed    — share actions but always use agent-index order (no negotiation)
+MODES: dict[str, ModeConfig] = {
+    "seqcomm":           ModeConfig(compute_intention=True,  share_actions=True,  ordering="intention"),
+    "mappo":             ModeConfig(compute_intention=False, share_actions=False, ordering="fixed"),
+    "seqcomm_random":    ModeConfig(compute_intention=False, share_actions=True,  ordering="random"),
+    "seqcomm_no_action": ModeConfig(compute_intention=True,  share_actions=False, ordering="intention"),
+    "seqcomm_fixed":     ModeConfig(compute_intention=False, share_actions=True,  ordering="fixed"),
+}
+
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -152,16 +176,24 @@ def run_episode(
     n_agents: int,
     obs_dim: int,
     encoder, attn_a, attn_w, world_model_net, policy, critic,
+    mode_cfg: ModeConfig = MODES["seqcomm"],
 ) -> tuple[list[dict], dict]:
     """
-    Run one full episode following the SeqComm protocol:
-      1. Encode observations → hidden states h.
-      2. Each agent estimates its intention via H-step world-model rollout.
-      3. Sort agents by intention (descending) → priority ordering.
-      4. Launching cascade: each agent conditions on zero-padded upper actions.
+    Run one full episode.  Behaviour is controlled by mode_cfg:
+
+      compute_intention  — whether to run world-model rollouts (Algorithm 5)
+                           to score agents and determine priority order.
+                           False → skip; intentions are all 0.0.
+      share_actions      — whether upper-level agents' actual actions are
+                           passed to lower-level agents in the launching phase.
+                           False → upper_actions tensor stays zero (no cascade).
+      ordering           — how to rank agents each step:
+                             "intention" sort by computed intention (descending)
+                             "random"    random permutation
+                             "fixed"     always [0, 1, ..., n_agents-1]
 
     Returns (transitions, episode_info).
-      transitions  — T*N dicts, one per agent per timestep, for MAPPO update
+      transitions  — T_actual*N dicts, one per agent per timestep
       episode_info — scalar metrics + per-step histories for logging
     """
     obs_list = env.reset()
@@ -171,44 +203,49 @@ def run_episode(
     total_reward      = 0.0
     n_collisions      = 0
     n_goals_reached   = 0
-    step_done         = EPISODE_LEN  # timestep when done fired; default = timeout
+    step_done         = EPISODE_LEN
     done              = False
-    ordering_history  = []           # ordering at each step
-    intention_history = []           # intention vector at each step
+    ordering_history  = []
+    intention_history = []
 
     for t in range(EPISODE_LEN):
-        obs_tensors = [torch.tensor(o) for o in obs_list]  # list of (obs_dim,)
+        obs_tensors = [torch.tensor(o) for o in obs_list]
 
         # ── 1. Encode ──────────────────────────────────────────────────────────
-        h = [encoder(o.unsqueeze(0)) for o in obs_tensors]  # list of (1, embed)
+        h = [encoder(o.unsqueeze(0)) for o in obs_tensors]
 
-        # ── 2. Compute intentions (Algorithm 5 in paper) ──────────────────────
-        #  Each agent simulates F random orderings × H world-model steps,
-        #  treating itself as the first mover.  The average discounted return
-        #  is the agent's "intention value."
-        intentions = [
-            compute_intention(
-                i, obs_tensors, encoder, attn_a, attn_w, world_model_net,
-                policy, critic, H, F, n_agents, obs_dim, ACTION_DIM, GAMMA,
-            )
-            for i in range(n_agents)
-        ]
+        # ── 2. Intention (negotiation phase) ──────────────────────────────────
+        if mode_cfg.compute_intention:
+            intentions = [
+                compute_intention(
+                    i, obs_tensors, encoder, attn_a, attn_w, world_model_net,
+                    policy, critic, H, F, n_agents, obs_dim, ACTION_DIM, GAMMA,
+                )
+                for i in range(n_agents)
+            ]
+        else:
+            intentions = [0.0] * n_agents  # unused; ordering determined by mode
 
-        # ── 3. Priority ordering: highest intention goes first ─────────────────
-        ordering = sorted(range(n_agents), key=lambda i: -intentions[i])
+        # ── 3. Priority ordering ───────────────────────────────────────────────
+        if mode_cfg.ordering == "intention":
+            ordering = sorted(range(n_agents), key=lambda i: -intentions[i])
+        elif mode_cfg.ordering == "random":
+            ordering = list(range(n_agents))
+            random.shuffle(ordering)
+        else:  # "fixed"
+            ordering = list(range(n_agents))
+
         ordering_history.append(ordering)
         intention_history.append([float(v) for v in intentions])
 
-        # ── 4. Launching cascade (Algorithm 3 in paper) ───────────────────────
-        #  Each agent in priority order conditions its action on all upper
-        #  agents' actual actions.  Lower agents see those actions via
-        #  zero-padded upper_actions tensor.
+        # ── 4. Launching cascade ───────────────────────────────────────────────
         upper_so_far: list[torch.Tensor] = []
         agent_data: dict[int, tuple] = {}
         for _, i in enumerate(ordering):
             up_pad = torch.zeros(1, n_agents, ACTION_DIM)
-            for l, ua in enumerate(upper_so_far):
-                up_pad[0, l] = ua
+            if mode_cfg.share_actions:
+                for l, ua in enumerate(upper_so_far):
+                    up_pad[0, l] = ua
             ctx  = attn_a(h[i], up_pad)
             dist = policy(ctx)
             act  = dist.sample()
@@ -285,9 +322,12 @@ def update(
     opt_world: torch.optim.Optimizer,
     opt_policy: torch.optim.Optimizer,
 ) -> dict:
-    T = EPISODE_LEN
+    # Use actual episode length — episodes can end before EPISODE_LEN (e.g. all
+    # agents reach their goal in the intersection env), and indexing with a
+    # hardcoded EPISODE_LEN would cause an out-of-bounds error once learning kicks in.
+    T = len([tr for tr in transitions if tr["agent_id"] == 0])
 
-    # GAE per agent
+    # GAE per agent (works for any T)
     adv_by_agent: dict[int, list[float]] = {}
     ret_by_agent: dict[int, list[float]] = {}
     for i in range(n_agents):
@@ -305,7 +345,7 @@ def update(
     next_obs_wm = torch.stack([tr["next_obs_all"] for tr in trs_a0])
     rewards_wm  = torch.tensor([tr["reward"] for tr in trs_a0], dtype=torch.float32)
 
-    # Policy/value batch
+    # Policy/value batch — iterate over actual transitions, not a hardcoded range
     obs_pv_list, up_list, act_list, ret_list, adv_list, lp_list = [], [], [], [], [], []
     for t in range(T):
         for i in range(n_agents):
@@ -418,12 +458,16 @@ def main(args) -> None:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
-    env     = make_env(args.env, N_AGENTS)
-    obs_dim = env.obs_dim
+    mode_cfg = MODES[args.mode]
+    env      = make_env(args.env, N_AGENTS)
+    obs_dim  = env.obs_dim
 
-    print(f"Training SeqComm on '{args.env}' env | "
+    print(f"Training [{args.mode}] on '{args.env}' env | "
           f"obs_dim={obs_dim}  embed_dim={EMBED_DIM}  action_dim={ACTION_DIM}  "
-          f"agents={N_AGENTS}  episodes={args.episodes}  seed={args.seed}")
+          f"agents={N_AGENTS}  episodes={args.episodes}  seed={args.seed}  "
+          f"compute_intention={mode_cfg.compute_intention}  "
+          f"share_actions={mode_cfg.share_actions}  "
+          f"ordering={mode_cfg.ordering}")
 
     encoder         = ObservationEncoder(obs_dim, EMBED_DIM)
     attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM)
@@ -449,12 +493,15 @@ def main(args) -> None:
     # ── Logger setup ─────────────────────────────────────────────────────────
     logger = None
     if args.log_dir:
-        log_filename = f"{args.env}_seqcomm_seed{args.seed}.jsonl"
+        log_filename = f"{args.env}_{args.mode}_seed{args.seed}.jsonl"
         log_path = os.path.join(args.log_dir, log_filename)
         metadata = {
-            "env":        args.env,
-            "mode":       "seqcomm",
-            "seed":       args.seed,
+            "env":                args.env,
+            "mode":               args.mode,
+            "compute_intention":  mode_cfg.compute_intention,
+            "share_actions":      mode_cfg.share_actions,
+            "ordering":           mode_cfg.ordering,
+            "seed":               args.seed,
             "n_agents":   N_AGENTS,
             "obs_dim":    obs_dim,
             "embed_dim":  EMBED_DIM,
@@ -475,6 +522,7 @@ def main(args) -> None:
         transitions, episode_info = run_episode(
             env, N_AGENTS, obs_dim,
             encoder, attn_a, attn_w, world_model_net, policy, critic,
+            mode_cfg=mode_cfg,
         )
         losses = update(
             N_AGENTS, encoder, attn_a, attn_w, world_model_net, policy, critic,
@@ -515,6 +563,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--env", choices=["gaussian", "coverage", "intersection"], default="gaussian",
         help="Environment to train on (default: gaussian)",
+    )
+    parser.add_argument(
+        "--mode", choices=list(MODES), default="seqcomm",
+        help=(
+            "Training variant (default: seqcomm).  "
+            "seqcomm=full paper method, "
+            "mappo=no communication, "
+            "seqcomm_random=random order + action sharing, "
+            "seqcomm_no_action=intention order but no action sharing, "
+            "seqcomm_fixed=fixed order + action sharing"
+        ),
     )
     parser.add_argument(
         "--episodes", type=int, default=N_EPISODES,

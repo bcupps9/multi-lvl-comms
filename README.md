@@ -123,9 +123,32 @@ changes, but doesn't exercise the real concurrent SeqComm protocol.
 
 Key flags:
 - `--env`          — `gaussian`, `coverage`, or `intersection` (default: gaussian)
-- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_seqcomm_seed<N>.jsonl`
+- `--mode`         — ablation variant (default: `seqcomm`); see table below
+- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>_seed<N>.jsonl`
 - `--seed N`       — fix torch + Python RNG for reproducible runs
 - `--save-every N` — checkpoint weights every N episodes in addition to the final save
+
+### Ablation modes
+
+| `--mode`              | Intention negotiation | Action sharing in launch | Ordering        |
+|-----------------------|-----------------------|--------------------------|-----------------|
+| `seqcomm`             | ✓ world-model rollout | ✓ upper → lower          | by intention    |
+| `mappo`               | ✗                     | ✗                        | fixed [0,1,2,3] |
+| `seqcomm_random`      | ✗                     | ✓                        | random shuffle  |
+| `seqcomm_no_action`   | ✓                     | ✗                        | by intention    |
+| `seqcomm_fixed`       | ✗                     | ✓                        | fixed [0,1,2,3] |
+
+To run all five variants for three seeds each (15 total runs):
+
+```bash
+for mode in seqcomm mappo seqcomm_random seqcomm_no_action seqcomm_fixed; do
+  for seed in 0 1 2; do
+    python3 -m training.train \
+      --env intersection --mode $mode --seed $seed \
+      --episodes 2000 --log-dir logs/
+  done
+done
+```
 
 ### Episode logging
 
