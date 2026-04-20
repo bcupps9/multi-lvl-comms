@@ -124,9 +124,52 @@ changes, but doesn't exercise the real concurrent SeqComm protocol.
 Key flags:
 - `--env`          — `gaussian`, `coverage`, or `intersection` (default: gaussian)
 - `--mode`         — ablation variant (default: `seqcomm`); see table below
-- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>_seed<N>.jsonl`
+- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>[_<comm>]_seed<N>.jsonl`
 - `--seed N`       — fix torch + Python RNG for reproducible runs
 - `--save-every N` — checkpoint weights every N episodes in addition to the final save
+
+Communication stressor flags (all default to perfect/lossless):
+- `--comm-delay N`  — message arrives N steps late; first N steps see zeros
+- `--comm-drop P`   — each message is independently dropped with probability P
+- `--comm-noise S`  — additive Gaussian noise with std S on every received tensor
+- `--comm-bits B`   — quantise messages to 2^B uniform levels (0 = full float32)
+
+Stressors can be combined. The comm tag is appended to the log filename only when at
+least one stressor is active, e.g. `intersection_seqcomm_delay2_drop0.3_seed0.jsonl`.
+
+Example — seqcomm under 30% packet drop:
+```bash
+python3 -m training.train \
+  --env intersection --mode seqcomm --seed 0 \
+  --episodes 2000 --log-dir logs/ \
+  --comm-drop 0.3
+```
+
+### World-model accuracy stressors
+
+These flags degrade the *intention computation* only — the env step and training
+gradients always use clean observations. They simulate the sim-to-real gap that
+appears when a world model trained in simulation is deployed on real hardware.
+
+- `--obs-noise STD`  — additive Gaussian noise on each agent's own observation
+                       before `compute_intention`. The world model was never trained
+                       on noisy inputs, so intention estimates become less reliable.
+- `--wm-H N`         — rollout horizon used in `compute_intention` at inference
+                       (training default: 5). Lower → shallower rollouts → noisier
+                       intention values and less accurate priority ordering.
+- `--wm-F N`         — random orderings sampled per intention estimate (training
+                       default: 4). Lower → higher variance in estimates.
+
+These flags are recorded in the `_meta` header and reflected in the log filename,
+e.g. `intersection_seqcomm_obsnoise0.1_H2_F1_seed0.jsonl`.
+
+Example — degraded rollout fidelity (H=1, F=1) with sensor noise:
+```bash
+python3 -m training.train \
+  --env intersection --mode seqcomm --seed 0 \
+  --episodes 2000 --log-dir logs/ \
+  --obs-noise 0.1 --wm-H 1 --wm-F 1
+```
 
 ### Ablation modes
 
@@ -163,6 +206,7 @@ When `--log-dir` is set, each episode appends one JSON record to the log file:
   "deadlock": false,
   "n_collisions": 2,
   "n_goals_reached": 4,
+  "n_msgs_dropped": 7,
   "order_entropy": 1.23,
   "mean_intention_spread": 0.45,
   "first_mover_counts": [12, 8, 15, 65],

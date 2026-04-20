@@ -22,6 +22,7 @@ import math
 import os
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 import torch
 import torch.optim as optim
@@ -83,6 +84,126 @@ MODES: dict[str, ModeConfig] = {
 }
 
 
+# ── Communication stressors ────────────────────────────────────────────────────
+
+@dataclass
+class CommConfig:
+    """
+    Controls imperfect communication between agents.
+
+    All four stressors can be combined. They are applied in order:
+      delay → drop → noise → bandwidth
+
+    delay (int):
+        Each message arrives N timesteps late. During the first N steps of
+        an episode the receiver gets zeros (no prior message exists yet).
+        Models real network latency or slow sensing pipelines.
+
+    drop_prob (float in [0, 1]):
+        Each message is independently lost with this probability; the
+        receiver gets a zero tensor instead. Models unreliable wireless links.
+
+    noise_std (float ≥ 0):
+        Additive Gaussian noise with this std is added to every received
+        tensor. Models sensor noise or lossy compression artefacts.
+
+    bandwidth_bits (int ≥ 0):
+        Quantise each message to 2^bits uniform levels (0 = lossless).
+        Models limited channel capacity: 4 bits ≈ 16 discrete levels,
+        8 bits ≈ 256 levels, 0 = full float32 precision.
+    """
+    delay:           int   = 0
+    drop_prob:       float = 0.0
+    noise_std:       float = 0.0
+    bandwidth_bits:  int   = 0
+
+    def is_perfect(self) -> bool:
+        return (self.delay == 0 and self.drop_prob == 0.0
+                and self.noise_std == 0.0 and self.bandwidth_bits == 0)
+
+    def tag(self) -> str:
+        """Short identifier for filenames; empty string when no stressor is active."""
+        if self.is_perfect():
+            return ""
+        parts = []
+        if self.delay          > 0:   parts.append(f"delay{self.delay}")
+        if self.drop_prob      > 0.0: parts.append(f"drop{self.drop_prob}")
+        if self.noise_std      > 0.0: parts.append(f"noise{self.noise_std}")
+        if self.bandwidth_bits > 0:   parts.append(f"bits{self.bandwidth_bits}")
+        return "_".join(parts)
+
+
+class CommChannel:
+    """
+    Applies CommConfig stressors to any tensor message.
+
+    One instance is shared for the whole run. Delay buffers are keyed by
+    (sender_id, receiver_id) so each directed channel has its own history.
+    Call reset() at the start of every episode to clear those buffers.
+
+    Usage
+    -----
+    channel = CommChannel(comm_cfg)
+    # inside run_episode:
+    channel.reset()
+    received = channel.transmit(tensor, sender=j, receiver=i)
+    """
+
+    def __init__(self, cfg: CommConfig):
+        self.cfg = cfg
+        # (sender, receiver) → deque of past messages, length = cfg.delay
+        self._buffers: dict[tuple[int, int], deque] = {}
+        self.n_dropped: int = 0
+
+    def reset(self) -> None:
+        self._buffers.clear()
+        self.n_dropped = 0
+
+    def transmit(
+        self,
+        msg: torch.Tensor,
+        sender: int,
+        receiver: int,
+    ) -> torch.Tensor:
+        """Return what receiver actually gets when sender transmits msg."""
+
+        # 1. Delay — retrieve the message sent `delay` steps ago.
+        #    Buffer holds the last `delay` messages; oldest is what we return.
+        #    Starts filled with zeros so early steps see "nothing sent yet".
+        if self.cfg.delay > 0:
+            key = (sender, receiver)
+            if key not in self._buffers:
+                self._buffers[key] = deque(
+                    [torch.zeros_like(msg)] * self.cfg.delay
+                )
+            buf = self._buffers[key]
+            received = buf.popleft()   # message from `delay` steps ago
+            buf.append(msg.clone())    # enqueue this step's message
+        else:
+            received = msg.clone()
+
+        # 2. Drop — packet lost entirely; receiver gets zeros.
+        if self.cfg.drop_prob > 0.0 and random.random() < self.cfg.drop_prob:
+            self.n_dropped += 1
+            return torch.zeros_like(received)
+
+        # 3. Noise — additive Gaussian channel noise.
+        if self.cfg.noise_std > 0.0:
+            received = received + torch.randn_like(received) * self.cfg.noise_std
+
+        # 4. Bandwidth — uniform quantisation to 2^bits levels.
+        #    lo==hi means the tensor is constant; skip to avoid divide-by-zero.
+        if self.cfg.bandwidth_bits > 0:
+            levels = 2 ** self.cfg.bandwidth_bits
+            lo, hi = received.min(), received.max()
+            if hi > lo:
+                norm     = (received - lo) / (hi - lo)
+                quantised = (norm * (levels - 1)).round() / (levels - 1)
+                received  = quantised * (hi - lo) + lo
+
+        return received
+
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 class EpisodeLogger:
@@ -138,6 +259,7 @@ class EpisodeLogger:
             "deadlock":              info["deadlock"],
             "n_collisions":          info["n_collisions"],
             "n_goals_reached":       info["n_goals_reached"],
+            "n_msgs_dropped":        info["n_msgs_dropped"],
             "order_entropy":         round(order_entropy, 4),
             "mean_intention_spread": round(mean_intention_spread, 4),
             "first_mover_counts":    first_mover_counts,
@@ -177,6 +299,10 @@ def run_episode(
     obs_dim: int,
     encoder, attn_a, attn_w, world_model_net, policy, critic,
     mode_cfg: ModeConfig = MODES["seqcomm"],
+    comm_channel: "CommChannel | None" = None,
+    obs_noise_std: float = 0.0,
+    H_infer: int = H,
+    F_infer: int = F,
 ) -> tuple[list[dict], dict]:
     """
     Run one full episode.  Behaviour is controlled by mode_cfg:
@@ -192,11 +318,23 @@ def run_episode(
                              "random"    random permutation
                              "fixed"     always [0, 1, ..., n_agents-1]
 
+    World-model accuracy stressors (applied only to intention computation,
+    not to the env step or training update):
+      obs_noise_std — Gaussian noise added to each agent's own observation
+                      before it enters compute_intention.  Simulates sensor
+                      noise not seen during training (sim-to-real gap).
+      H_infer       — rollout horizon used in compute_intention at inference.
+                      Lower than training H → shallower, less accurate rollouts.
+      F_infer       — number of random orderings sampled in compute_intention.
+                      Lower than training F → higher-variance intention estimates.
+
     Returns (transitions, episode_info).
       transitions  — T_actual*N dicts, one per agent per timestep
       episode_info — scalar metrics + per-step histories for logging
     """
     obs_list = env.reset()
+    if comm_channel is not None:
+        comm_channel.reset()
     transitions: list[dict] = []
 
     # Per-episode accumulators for logging
@@ -212,17 +350,42 @@ def run_episode(
         obs_tensors = [torch.tensor(o) for o in obs_list]
 
         # ── 1. Encode ──────────────────────────────────────────────────────────
+        # h is built from clean obs — sensor noise only affects intention rollouts,
+        # not the actual action (policy still acts on what the sensor really reports).
         h = [encoder(o.unsqueeze(0)) for o in obs_tensors]
 
         # ── 2. Intention (negotiation phase) ──────────────────────────────────
         if mode_cfg.compute_intention:
-            intentions = [
-                compute_intention(
-                    i, obs_tensors, encoder, attn_a, attn_w, world_model_net,
-                    policy, critic, H, F, n_agents, obs_dim, ACTION_DIM, GAMMA,
+            intentions = []
+            for i in range(n_agents):
+                # Obs noise: agent i's own sensor is corrupted (sim-to-real gap).
+                # Applied before comm so the noisy reading is what gets shared too.
+                if obs_noise_std > 0.0:
+                    noisy = [
+                        o + torch.randn_like(o) * obs_noise_std
+                        for o in obs_tensors
+                    ]
+                else:
+                    noisy = obs_tensors
+
+                if comm_channel is not None:
+                    # Each agent sees its own (possibly noisy) obs directly;
+                    # neighbors' obs are further corrupted by the comm channel.
+                    obs_for_i = [
+                        comm_channel.transmit(noisy[j], sender=j, receiver=i)
+                        if j != i else noisy[i]
+                        for j in range(n_agents)
+                    ]
+                else:
+                    obs_for_i = noisy if obs_noise_std > 0.0 else obs_tensors
+
+                intentions.append(
+                    compute_intention(
+                        i, obs_for_i, encoder, attn_a, attn_w, world_model_net,
+                        policy, critic, H_infer, F_infer, n_agents, obs_dim,
+                        ACTION_DIM, GAMMA,
+                    )
                 )
-                for i in range(n_agents)
-            ]
         else:
             intentions = [0.0] * n_agents  # unused; ordering determined by mode
 
@@ -239,12 +402,14 @@ def run_episode(
         intention_history.append([float(v) for v in intentions])
 
         # ── 4. Launching cascade ───────────────────────────────────────────────
-        upper_so_far: list[torch.Tensor] = []
+        upper_so_far: list[tuple[torch.Tensor, int]] = []  # (action, sender_id)
         agent_data: dict[int, tuple] = {}
         for _, i in enumerate(ordering):
             up_pad = torch.zeros(1, n_agents, ACTION_DIM)
             if mode_cfg.share_actions:
-                for l, ua in enumerate(upper_so_far):
+                for l, (ua, sender_id) in enumerate(upper_so_far):
+                    if comm_channel is not None:
+                        ua = comm_channel.transmit(ua, sender=sender_id, receiver=i)
                     up_pad[0, l] = ua
             ctx  = attn_a(h[i], up_pad)
             dist = policy(ctx)
@@ -252,7 +417,7 @@ def run_episode(
             lp   = dist.log_prob(act).sum().item()
             val  = critic(ctx).item()
             agent_data[i] = (act.squeeze(0), lp, val, up_pad.squeeze(0))
-            upper_so_far.append(act.squeeze(0))
+            upper_so_far.append((act.squeeze(0), i))
 
         # ── 5. Step environment ───────────────────────────────────────────────
         n_env_actions = env.action_dim if hasattr(env, 'action_dim') else env.N_ACTIONS
@@ -307,6 +472,7 @@ def run_episode(
         "deadlock":          step_done == EPISODE_LEN,
         "n_collisions":      n_collisions,
         "n_goals_reached":   n_goals_reached,
+        "n_msgs_dropped":    comm_channel.n_dropped if comm_channel is not None else 0,
         "ordering_history":  ordering_history,
         "intention_history": intention_history,
     }
@@ -462,12 +628,28 @@ def main(args) -> None:
     env      = make_env(args.env, N_AGENTS)
     obs_dim  = env.obs_dim
 
+    comm_cfg     = CommConfig(
+        delay=args.comm_delay,
+        drop_prob=args.comm_drop,
+        noise_std=args.comm_noise,
+        bandwidth_bits=args.comm_bits,
+    )
+    comm_channel = None if comm_cfg.is_perfect() else CommChannel(comm_cfg)
+    comm_tag     = comm_cfg.tag()
+
+    H_infer = args.wm_H
+    F_infer = args.wm_F
+
     print(f"Training [{args.mode}] on '{args.env}' env | "
           f"obs_dim={obs_dim}  embed_dim={EMBED_DIM}  action_dim={ACTION_DIM}  "
           f"agents={N_AGENTS}  episodes={args.episodes}  seed={args.seed}  "
           f"compute_intention={mode_cfg.compute_intention}  "
           f"share_actions={mode_cfg.share_actions}  "
-          f"ordering={mode_cfg.ordering}")
+          f"ordering={mode_cfg.ordering}"
+          + (f"  comm={comm_tag}" if comm_tag else "")
+          + (f"  obs_noise={args.obs_noise}" if args.obs_noise > 0.0 else "")
+          + (f"  H={H_infer}" if H_infer != H else "")
+          + (f"  F={F_infer}" if F_infer != F else ""))
 
     encoder         = ObservationEncoder(obs_dim, EMBED_DIM)
     attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM)
@@ -493,7 +675,13 @@ def main(args) -> None:
     # ── Logger setup ─────────────────────────────────────────────────────────
     logger = None
     if args.log_dir:
-        log_filename = f"{args.env}_{args.mode}_seed{args.seed}.jsonl"
+        wm_parts = []
+        if args.obs_noise > 0.0: wm_parts.append(f"obsnoise{args.obs_noise}")
+        if H_infer != H:         wm_parts.append(f"H{H_infer}")
+        if F_infer != F:         wm_parts.append(f"F{F_infer}")
+        wm_suffix   = ("_" + "_".join(wm_parts)) if wm_parts else ""
+        comm_suffix = f"_{comm_tag}" if comm_tag else ""
+        log_filename = f"{args.env}_{args.mode}{comm_suffix}{wm_suffix}_seed{args.seed}.jsonl"
         log_path = os.path.join(args.log_dir, log_filename)
         metadata = {
             "env":                args.env,
@@ -501,14 +689,21 @@ def main(args) -> None:
             "compute_intention":  mode_cfg.compute_intention,
             "share_actions":      mode_cfg.share_actions,
             "ordering":           mode_cfg.ordering,
+            "comm_delay":         comm_cfg.delay,
+            "comm_drop_prob":     comm_cfg.drop_prob,
+            "comm_noise_std":     comm_cfg.noise_std,
+            "comm_bandwidth_bits": comm_cfg.bandwidth_bits,
+            "obs_noise_std":      args.obs_noise,
+            "wm_H":               H_infer,
+            "wm_F":               F_infer,
             "seed":               args.seed,
             "n_agents":   N_AGENTS,
             "obs_dim":    obs_dim,
             "embed_dim":  EMBED_DIM,
             "episodes":   args.episodes,
             "episode_len": EPISODE_LEN,
-            "H":          H,
-            "F":          F,
+            "H_train":    H,
+            "F_train":    F,
             "gamma":      GAMMA,
             "lam":        LAM,
             "lr_world":   LR_WORLD,
@@ -523,6 +718,10 @@ def main(args) -> None:
             env, N_AGENTS, obs_dim,
             encoder, attn_a, attn_w, world_model_net, policy, critic,
             mode_cfg=mode_cfg,
+            comm_channel=comm_channel,
+            obs_noise_std=args.obs_noise,
+            H_infer=H_infer,
+            F_infer=F_infer,
         )
         losses = update(
             N_AGENTS, encoder, attn_a, attn_w, world_model_net, policy, critic,
@@ -594,6 +793,42 @@ if __name__ == "__main__":
     parser.add_argument(
         "--seed", type=int, default=0,
         help="Random seed for reproducibility (default: 0)",
+    )
+    # Communication stressors — all default to perfect (no degradation)
+    parser.add_argument(
+        "--comm-delay", type=int, default=0, metavar="N",
+        help="Message delay in steps; early steps see zeros (default: 0)",
+    )
+    parser.add_argument(
+        "--comm-drop", type=float, default=0.0, metavar="P",
+        help="Probability each message is lost, replaced by zeros (default: 0.0)",
+    )
+    parser.add_argument(
+        "--comm-noise", type=float, default=0.0, metavar="STD",
+        help="Std of additive Gaussian noise on every message (default: 0.0)",
+    )
+    parser.add_argument(
+        "--comm-bits", type=int, default=0, metavar="B",
+        help="Quantise messages to 2^B levels (0 = full float32, default: 0)",
+    )
+    # World-model accuracy stressors (sim-to-real gap / rollout fidelity)
+    parser.add_argument(
+        "--obs-noise", type=float, default=0.0, metavar="STD",
+        help=(
+            "Std of Gaussian noise added to each agent's own observation before "
+            "compute_intention. Simulates sensor noise unseen during training. "
+            "Does NOT affect the env step or training gradients. (default: 0.0)"
+        ),
+    )
+    parser.add_argument(
+        "--wm-H", type=int, default=H, metavar="N",
+        help=f"World-model rollout horizon used at inference (train default: {H}). "
+             f"Lower → shallower intention estimates.",
+    )
+    parser.add_argument(
+        "--wm-F", type=int, default=F, metavar="N",
+        help=f"Random orderings sampled per intention estimate (train default: {F}). "
+             f"Lower → higher-variance intention estimates.",
     )
     args = parser.parse_args()
     main(args)
