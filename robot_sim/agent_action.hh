@@ -120,10 +120,13 @@ struct Agent {
     std::vector<float> h;      // e(obs), set in negotiation_phase
     std::vector<float> action; // set in launching_phase
 
+    bool verbose = false;
+
     Agent(int id, int obs_dim, int action_dim,
           NeuralModels& models, Environment& env,
           std::vector<transition>& trajectory,
-          random_source& rng);
+          random_source& rng,
+          bool verbose = false);
 
     // ── Cotamer tasks ─────────────────────────────────────────────────────────
 

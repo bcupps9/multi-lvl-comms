@@ -50,13 +50,11 @@ struct LibtorchNeuralModels : NeuralModels {
         policy_      = load("policy.pt");    // returns (mean, log_std)
         critic_      = load("critic.pt");
 
-        // Switch all modules to inference mode (disables dropout etc.)
-        encoder_.eval();
-        attn_a_.eval();
-        attn_w_.eval();
-        world_model_.eval();
-        policy_.eval();
-        critic_.eval();
+        // Switch all modules to inference mode and apply JIT inference optimizations.
+        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_}) {
+            m->eval();
+            *m = torch::jit::optimize_for_inference(*m);
+        }
 
         // Read dims from config.json
         fs::path cfg_path = fs::path(weights_dir) / "config.json";
@@ -228,8 +226,10 @@ struct LibtorchNeuralModels : NeuralModels {
         world_model_ = load("world_model.pt");
         policy_      = load("policy.pt");
         critic_      = load("critic.pt");
-        encoder_.eval(); attn_a_.eval(); attn_w_.eval();
-        world_model_.eval(); policy_.eval(); critic_.eval();
+        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_}) {
+            m->eval();
+            *m = torch::jit::optimize_for_inference(*m);
+        }
     }
 
 private:
