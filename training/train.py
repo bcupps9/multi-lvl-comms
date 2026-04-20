@@ -18,7 +18,10 @@ Weight export (--save-weights):
 
 import argparse
 import json
+import math
 import os
+import random
+import time
 import torch
 import torch.optim as optim
 
@@ -56,6 +59,74 @@ LR_WORLD    = 3e-4
 LR_POLICY   = 3e-4
 LOG_EVERY   = 10
 
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+class EpisodeLogger:
+    """
+    Writes one JSON object per line (JSONL) to a log file.
+
+    Each line captures everything needed to reproduce the paper's
+    Figure 4-style learning curves plus robotics-specific metrics:
+      - total_reward, success, steps_to_completion, deadlock
+      - n_collisions (intersection env only)
+      - order_entropy: Shannon entropy over who becomes first mover
+        (high = ordering varies a lot; low = one agent dominates)
+      - mean_intention_spread: per-step std of agent intention values,
+        averaged over the episode (high = clear hierarchy each step)
+      - first_mover_counts: how many steps each agent ranked first
+      - training losses
+    """
+
+    def __init__(self, log_path: str, metadata: dict):
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+        self._f = open(log_path, "w")
+        # Write metadata as the first line so the file is self-describing
+        self._f.write(json.dumps({"_meta": metadata}) + "\n")
+        self._f.flush()
+        print(f"Logging to {log_path}")
+
+    def log(self, episode: int, info: dict, losses: dict) -> None:
+        ordering_history  = info["ordering_history"]   # list[list[int]]
+        intention_history = info["intention_history"]  # list[list[float]]
+        n_steps           = len(ordering_history)
+
+        # Who was first mover each step?
+        first_movers = [order[0] for order in ordering_history]
+        n_agents = len(ordering_history[0]) if ordering_history else 4
+        first_mover_counts = [first_movers.count(i) for i in range(n_agents)]
+
+        # Entropy of the first-mover distribution across the episode
+        probs = [c / n_steps for c in first_mover_counts if c > 0]
+        order_entropy = -sum(p * math.log(p) for p in probs) if probs else 0.0
+
+        # Per-step std of intention values → how differentiated agents are
+        intention_stds = [
+            float(torch.tensor(ivec).std().item()) if len(ivec) > 1 else 0.0
+            for ivec in intention_history
+        ]
+        mean_intention_spread = sum(intention_stds) / len(intention_stds) if intention_stds else 0.0
+
+        record = {
+            "episode":               episode,
+            "total_reward":          round(info["total_reward"], 4),
+            "success":               info["success"],
+            "steps_to_completion":   info["steps_to_completion"],
+            "deadlock":              info["deadlock"],
+            "n_collisions":          info["n_collisions"],
+            "n_goals_reached":       info["n_goals_reached"],
+            "order_entropy":         round(order_entropy, 4),
+            "mean_intention_spread": round(mean_intention_spread, 4),
+            "first_mover_counts":    first_mover_counts,
+            "world_model_loss":      round(losses["world_model"], 6),
+            "value_loss":            round(losses["value"], 6),
+            "policy_loss":           round(losses["policy"], 6),
+        }
+        self._f.write(json.dumps(record) + "\n")
+        self._f.flush()
+
+    def close(self) -> None:
+        self._f.close()
+
 
 # ── Environment factory ────────────────────────────────────────────────────────
 
@@ -81,7 +152,7 @@ def run_episode(
     n_agents: int,
     obs_dim: int,
     encoder, attn_a, attn_w, world_model_net, policy, critic,
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """
     Run one full episode following the SeqComm protocol:
       1. Encode observations → hidden states h.
@@ -89,17 +160,23 @@ def run_episode(
       3. Sort agents by intention (descending) → priority ordering.
       4. Launching cascade: each agent conditions on zero-padded upper actions.
 
-    Returns T*N transition dicts (one per agent per timestep).
-
-    Intention captures how much reward the agent predicts if it goes first.
-    The agent with the highest intention becomes the first mover — it commits
-    to an action before lower-priority agents, who then condition on that action.
-    This is Algorithm 5 in the paper.
+    Returns (transitions, episode_info).
+      transitions  — T*N dicts, one per agent per timestep, for MAPPO update
+      episode_info — scalar metrics + per-step histories for logging
     """
     obs_list = env.reset()
     transitions: list[dict] = []
 
-    for _ in range(EPISODE_LEN):
+    # Per-episode accumulators for logging
+    total_reward      = 0.0
+    n_collisions      = 0
+    n_goals_reached   = 0
+    step_done         = EPISODE_LEN  # timestep when done fired; default = timeout
+    done              = False
+    ordering_history  = []           # ordering at each step
+    intention_history = []           # intention vector at each step
+
+    for t in range(EPISODE_LEN):
         obs_tensors = [torch.tensor(o) for o in obs_list]  # list of (obs_dim,)
 
         # ── 1. Encode ──────────────────────────────────────────────────────────
@@ -119,6 +196,8 @@ def run_episode(
 
         # ── 3. Priority ordering: highest intention goes first ─────────────────
         ordering = sorted(range(n_agents), key=lambda i: -intentions[i])
+        ordering_history.append(ordering)
+        intention_history.append([float(v) for v in intentions])
 
         # ── 4. Launching cascade (Algorithm 3 in paper) ───────────────────────
         #  Each agent in priority order conditions its action on all upper
@@ -144,7 +223,17 @@ def run_episode(
             int(agent_data[i][0].round().clamp(0, n_env_actions - 1).item())
             for i in range(n_agents)
         ]
-        next_obs_list, reward, _ = env.step(env_actions)
+        next_obs_list, reward, done = env.step(env_actions)
+
+        # ── 6. Accumulate episode stats ───────────────────────────────────────
+        total_reward += reward
+        if hasattr(env, 'last_collisions'):
+            n_collisions += env.last_collisions
+        if hasattr(env, 'last_goals_this_step'):
+            n_goals_reached += env.last_goals_this_step
+
+        if done and step_done == EPISODE_LEN:
+            step_done = t + 1  # 1-indexed steps to completion
 
         obs_all      = torch.stack(obs_tensors, 0)
         next_obs_all = torch.stack([torch.tensor(o) for o in next_obs_list], 0)
@@ -166,7 +255,25 @@ def run_episode(
 
         obs_list = next_obs_list
 
-    return transitions
+        if done:
+            # Pad ordering/intention history to EPISODE_LEN so downstream
+            # stats have a consistent length regardless of when done fires.
+            while len(ordering_history) < EPISODE_LEN:
+                ordering_history.append(ordering)
+                intention_history.append([float(v) for v in intentions])
+            break
+
+    episode_info = {
+        "total_reward":      total_reward,
+        "success":           done,
+        "steps_to_completion": step_done,
+        "deadlock":          step_done == EPISODE_LEN,
+        "n_collisions":      n_collisions,
+        "n_goals_reached":   n_goals_reached,
+        "ordering_history":  ordering_history,
+        "intention_history": intention_history,
+    }
+    return transitions, episode_info
 
 
 # ── Update ─────────────────────────────────────────────────────────────────────
@@ -307,12 +414,16 @@ def save_weights(
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(args) -> None:
-    env      = make_env(args.env, N_AGENTS)
-    obs_dim  = env.obs_dim
+    # ── Reproducibility ───────────────────────────────────────────────────────
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+
+    env     = make_env(args.env, N_AGENTS)
+    obs_dim = env.obs_dim
 
     print(f"Training SeqComm on '{args.env}' env | "
           f"obs_dim={obs_dim}  embed_dim={EMBED_DIM}  action_dim={ACTION_DIM}  "
-          f"agents={N_AGENTS}  episodes={args.episodes}")
+          f"agents={N_AGENTS}  episodes={args.episodes}  seed={args.seed}")
 
     encoder         = ObservationEncoder(obs_dim, EMBED_DIM)
     attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM)
@@ -335,8 +446,33 @@ def main(args) -> None:
         lr=LR_POLICY,
     )
 
+    # ── Logger setup ─────────────────────────────────────────────────────────
+    logger = None
+    if args.log_dir:
+        log_filename = f"{args.env}_seqcomm_seed{args.seed}.jsonl"
+        log_path = os.path.join(args.log_dir, log_filename)
+        metadata = {
+            "env":        args.env,
+            "mode":       "seqcomm",
+            "seed":       args.seed,
+            "n_agents":   N_AGENTS,
+            "obs_dim":    obs_dim,
+            "embed_dim":  EMBED_DIM,
+            "episodes":   args.episodes,
+            "episode_len": EPISODE_LEN,
+            "H":          H,
+            "F":          F,
+            "gamma":      GAMMA,
+            "lam":        LAM,
+            "lr_world":   LR_WORLD,
+            "lr_policy":  LR_POLICY,
+            "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        logger = EpisodeLogger(log_path, metadata)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
     for ep in range(args.episodes):
-        transitions = run_episode(
+        transitions, episode_info = run_episode(
             env, N_AGENTS, obs_dim,
             encoder, attn_a, attn_w, world_model_net, policy, critic,
         )
@@ -345,10 +481,15 @@ def main(args) -> None:
             transitions, opt_world, opt_policy,
         )
 
+        if logger:
+            logger.log(ep, episode_info, losses)
+
         if ep % LOG_EVERY == 0:
-            ep_reward = sum(tr["reward"] for tr in transitions if tr["agent_id"] == 0)
+            success_str = "✓" if episode_info["success"] else f"t={episode_info['steps_to_completion']}"
             print(
-                f"ep {ep:4d} | R={ep_reward:7.2f} | "
+                f"ep {ep:4d} | R={episode_info['total_reward']:7.2f} | "
+                f"collisions={episode_info['n_collisions']}  "
+                f"done={success_str}  "
                 f"wm={losses['world_model']:.4f}  "
                 f"v={losses['value']:.4f}  "
                 f"π={losses['policy']:.4f}"
@@ -360,10 +501,13 @@ def main(args) -> None:
             save_weights(ckpt, obs_dim, N_AGENTS,
                          encoder, attn_a, attn_w, world_model_net, policy, critic)
 
-    # Final save
+    # ── Final save + cleanup ──────────────────────────────────────────────────
     if args.save_weights:
         save_weights(args.save_weights, obs_dim, N_AGENTS,
                      encoder, attn_a, attn_w, world_model_net, policy, critic)
+
+    if logger:
+        logger.close()
 
 
 if __name__ == "__main__":
@@ -383,6 +527,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-every", type=int, default=0, metavar="N",
         help="Also save a checkpoint every N episodes (0 = only at end)",
+    )
+    parser.add_argument(
+        "--log-dir", metavar="DIR", default=None,
+        help="Directory to write JSONL training logs (one file per run)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Random seed for reproducibility (default: 0)",
     )
     args = parser.parse_args()
     main(args)

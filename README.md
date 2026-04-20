@@ -114,11 +114,49 @@ ep   10 | R=  31.50  avg=  24.11 | wm=0.0198  v=0.1531  π=0.0021  (1.1s)
 ### Python-only training (no libtorch required)
 
 ```bash
-python -m training.train --episodes 2000 --save-weights weights/
+python -m training.train --env intersection --episodes 2000 --save-weights weights/ \
+    --log-dir logs/ --seed 0
 ```
 
 Uses a Python rollout instead of the C++ sim — faster to iterate on architecture
 changes, but doesn't exercise the real concurrent SeqComm protocol.
+
+Key flags:
+- `--env`          — `gaussian`, `coverage`, or `intersection` (default: gaussian)
+- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_seqcomm_seed<N>.jsonl`
+- `--seed N`       — fix torch + Python RNG for reproducible runs
+- `--save-every N` — checkpoint weights every N episodes in addition to the final save
+
+### Episode logging
+
+When `--log-dir` is set, each episode appends one JSON record to the log file:
+
+```json
+{
+  "episode": 42,
+  "total_reward": 37.42,
+  "success": true,
+  "steps_to_completion": 87,
+  "deadlock": false,
+  "n_collisions": 2,
+  "n_goals_reached": 4,
+  "order_entropy": 1.23,
+  "mean_intention_spread": 0.45,
+  "first_mover_counts": [12, 8, 15, 65],
+  "world_model_loss": 0.023400,
+  "value_loss": 0.145000,
+  "policy_loss": 0.012300
+}
+```
+
+- `order_entropy` — Shannon entropy of the first-mover distribution across episode steps.
+  High (≈ log 4 ≈ 1.39) means all agents take turns leading; low means one agent dominates.
+- `mean_intention_spread` — average per-step std of agent intention values.
+  High means agents clearly differentiate their priorities each step.
+- `first_mover_counts` — how many steps each agent ranked first in the priority ordering.
+
+The first line of each log file is a `{"_meta": {...}}` record with all hyperparameters
+and the run timestamp, so the file is fully self-describing.
 
 ---
 
