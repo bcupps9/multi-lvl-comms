@@ -145,6 +145,32 @@ python3 -m training.train \
   --comm-drop 0.3
 ```
 
+### World-model accuracy stressors
+
+These flags degrade the *intention computation* only — the env step and training
+gradients always use clean observations. They simulate the sim-to-real gap that
+appears when a world model trained in simulation is deployed on real hardware.
+
+- `--obs-noise STD`  — additive Gaussian noise on each agent's own observation
+                       before `compute_intention`. The world model was never trained
+                       on noisy inputs, so intention estimates become less reliable.
+- `--wm-H N`         — rollout horizon used in `compute_intention` at inference
+                       (training default: 5). Lower → shallower rollouts → noisier
+                       intention values and less accurate priority ordering.
+- `--wm-F N`         — random orderings sampled per intention estimate (training
+                       default: 4). Lower → higher variance in estimates.
+
+These flags are recorded in the `_meta` header and reflected in the log filename,
+e.g. `intersection_seqcomm_obsnoise0.1_H2_F1_seed0.jsonl`.
+
+Example — degraded rollout fidelity (H=1, F=1) with sensor noise:
+```bash
+python3 -m training.train \
+  --env intersection --mode seqcomm --seed 0 \
+  --episodes 2000 --log-dir logs/ \
+  --obs-noise 0.1 --wm-H 1 --wm-F 1
+```
+
 ### Ablation modes
 
 | `--mode`              | Intention negotiation | Action sharing in launch | Ordering        |

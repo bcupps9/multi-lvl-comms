@@ -300,6 +300,9 @@ def run_episode(
     encoder, attn_a, attn_w, world_model_net, policy, critic,
     mode_cfg: ModeConfig = MODES["seqcomm"],
     comm_channel: "CommChannel | None" = None,
+    obs_noise_std: float = 0.0,
+    H_infer: int = H,
+    F_infer: int = F,
 ) -> tuple[list[dict], dict]:
     """
     Run one full episode.  Behaviour is controlled by mode_cfg:
@@ -314,6 +317,16 @@ def run_episode(
                              "intention" sort by computed intention (descending)
                              "random"    random permutation
                              "fixed"     always [0, 1, ..., n_agents-1]
+
+    World-model accuracy stressors (applied only to intention computation,
+    not to the env step or training update):
+      obs_noise_std — Gaussian noise added to each agent's own observation
+                      before it enters compute_intention.  Simulates sensor
+                      noise not seen during training (sim-to-real gap).
+      H_infer       — rollout horizon used in compute_intention at inference.
+                      Lower than training H → shallower, less accurate rollouts.
+      F_infer       — number of random orderings sampled in compute_intention.
+                      Lower than training F → higher-variance intention estimates.
 
     Returns (transitions, episode_info).
       transitions  — T_actual*N dicts, one per agent per timestep
@@ -337,26 +350,40 @@ def run_episode(
         obs_tensors = [torch.tensor(o) for o in obs_list]
 
         # ── 1. Encode ──────────────────────────────────────────────────────────
+        # h is built from clean obs — sensor noise only affects intention rollouts,
+        # not the actual action (policy still acts on what the sensor really reports).
         h = [encoder(o.unsqueeze(0)) for o in obs_tensors]
 
         # ── 2. Intention (negotiation phase) ──────────────────────────────────
         if mode_cfg.compute_intention:
             intentions = []
             for i in range(n_agents):
+                # Obs noise: agent i's own sensor is corrupted (sim-to-real gap).
+                # Applied before comm so the noisy reading is what gets shared too.
+                if obs_noise_std > 0.0:
+                    noisy = [
+                        o + torch.randn_like(o) * obs_noise_std
+                        for o in obs_tensors
+                    ]
+                else:
+                    noisy = obs_tensors
+
                 if comm_channel is not None:
-                    # Each agent sees its own obs perfectly; neighbors' obs are
-                    # corrupted by the comm channel (sender=j, receiver=i).
+                    # Each agent sees its own (possibly noisy) obs directly;
+                    # neighbors' obs are further corrupted by the comm channel.
                     obs_for_i = [
-                        comm_channel.transmit(obs_tensors[j], sender=j, receiver=i)
-                        if j != i else obs_tensors[j]
+                        comm_channel.transmit(noisy[j], sender=j, receiver=i)
+                        if j != i else noisy[i]
                         for j in range(n_agents)
                     ]
                 else:
-                    obs_for_i = obs_tensors
+                    obs_for_i = noisy if obs_noise_std > 0.0 else obs_tensors
+
                 intentions.append(
                     compute_intention(
                         i, obs_for_i, encoder, attn_a, attn_w, world_model_net,
-                        policy, critic, H, F, n_agents, obs_dim, ACTION_DIM, GAMMA,
+                        policy, critic, H_infer, F_infer, n_agents, obs_dim,
+                        ACTION_DIM, GAMMA,
                     )
                 )
         else:
@@ -610,13 +637,19 @@ def main(args) -> None:
     comm_channel = None if comm_cfg.is_perfect() else CommChannel(comm_cfg)
     comm_tag     = comm_cfg.tag()
 
+    H_infer = args.wm_H
+    F_infer = args.wm_F
+
     print(f"Training [{args.mode}] on '{args.env}' env | "
           f"obs_dim={obs_dim}  embed_dim={EMBED_DIM}  action_dim={ACTION_DIM}  "
           f"agents={N_AGENTS}  episodes={args.episodes}  seed={args.seed}  "
           f"compute_intention={mode_cfg.compute_intention}  "
           f"share_actions={mode_cfg.share_actions}  "
           f"ordering={mode_cfg.ordering}"
-          + (f"  comm={comm_tag}" if comm_tag else ""))
+          + (f"  comm={comm_tag}" if comm_tag else "")
+          + (f"  obs_noise={args.obs_noise}" if args.obs_noise > 0.0 else "")
+          + (f"  H={H_infer}" if H_infer != H else "")
+          + (f"  F={F_infer}" if F_infer != F else ""))
 
     encoder         = ObservationEncoder(obs_dim, EMBED_DIM)
     attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM)
@@ -642,8 +675,13 @@ def main(args) -> None:
     # ── Logger setup ─────────────────────────────────────────────────────────
     logger = None
     if args.log_dir:
+        wm_parts = []
+        if args.obs_noise > 0.0: wm_parts.append(f"obsnoise{args.obs_noise}")
+        if H_infer != H:         wm_parts.append(f"H{H_infer}")
+        if F_infer != F:         wm_parts.append(f"F{F_infer}")
+        wm_suffix   = ("_" + "_".join(wm_parts)) if wm_parts else ""
         comm_suffix = f"_{comm_tag}" if comm_tag else ""
-        log_filename = f"{args.env}_{args.mode}{comm_suffix}_seed{args.seed}.jsonl"
+        log_filename = f"{args.env}_{args.mode}{comm_suffix}{wm_suffix}_seed{args.seed}.jsonl"
         log_path = os.path.join(args.log_dir, log_filename)
         metadata = {
             "env":                args.env,
@@ -655,14 +693,17 @@ def main(args) -> None:
             "comm_drop_prob":     comm_cfg.drop_prob,
             "comm_noise_std":     comm_cfg.noise_std,
             "comm_bandwidth_bits": comm_cfg.bandwidth_bits,
+            "obs_noise_std":      args.obs_noise,
+            "wm_H":               H_infer,
+            "wm_F":               F_infer,
             "seed":               args.seed,
             "n_agents":   N_AGENTS,
             "obs_dim":    obs_dim,
             "embed_dim":  EMBED_DIM,
             "episodes":   args.episodes,
             "episode_len": EPISODE_LEN,
-            "H":          H,
-            "F":          F,
+            "H_train":    H,
+            "F_train":    F,
             "gamma":      GAMMA,
             "lam":        LAM,
             "lr_world":   LR_WORLD,
@@ -678,6 +719,9 @@ def main(args) -> None:
             encoder, attn_a, attn_w, world_model_net, policy, critic,
             mode_cfg=mode_cfg,
             comm_channel=comm_channel,
+            obs_noise_std=args.obs_noise,
+            H_infer=H_infer,
+            F_infer=F_infer,
         )
         losses = update(
             N_AGENTS, encoder, attn_a, attn_w, world_model_net, policy, critic,
@@ -766,6 +810,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--comm-bits", type=int, default=0, metavar="B",
         help="Quantise messages to 2^B levels (0 = full float32, default: 0)",
+    )
+    # World-model accuracy stressors (sim-to-real gap / rollout fidelity)
+    parser.add_argument(
+        "--obs-noise", type=float, default=0.0, metavar="STD",
+        help=(
+            "Std of Gaussian noise added to each agent's own observation before "
+            "compute_intention. Simulates sensor noise unseen during training. "
+            "Does NOT affect the env step or training gradients. (default: 0.0)"
+        ),
+    )
+    parser.add_argument(
+        "--wm-H", type=int, default=H, metavar="N",
+        help=f"World-model rollout horizon used at inference (train default: {H}). "
+             f"Lower → shallower intention estimates.",
+    )
+    parser.add_argument(
+        "--wm-F", type=int, default=F, metavar="N",
+        help=f"Random orderings sampled per intention estimate (train default: {F}). "
+             f"Lower → higher-variance intention estimates.",
     )
     args = parser.parse_args()
     main(args)
