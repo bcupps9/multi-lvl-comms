@@ -617,6 +617,34 @@ def save_weights(
     critic.train()
 
 
+def save_weights_raw(
+    weights_dir: str,
+    obs_dim: int,
+    n_agents: int,
+    encoder, attn_a, attn_w, world_model_net, policy, critic,
+) -> None:
+    """Write raw float32 parameter blob to weights.bin — no graph tracing overhead."""
+    import struct
+    os.makedirs(weights_dir, exist_ok=True)
+    modules = [encoder, attn_a, attn_w, world_model_net, policy, critic]
+    bufs = []
+    total = 0
+    for m in modules:
+        for p in m.parameters():
+            flat = p.detach().cpu().contiguous().view(-1).numpy()
+            bufs.append(flat.tobytes())
+            total += flat.size
+    with open(os.path.join(weights_dir, "weights.bin"), 'wb') as f:
+        f.write(struct.pack('<II', 0x57544253, total))
+        for b in bufs:
+            f.write(b)
+    cfg_path = os.path.join(weights_dir, "config.json")
+    if not os.path.exists(cfg_path):
+        with open(cfg_path, 'w') as f:
+            json.dump({"obs_dim": obs_dim, "embed_dim": EMBED_DIM,
+                       "action_dim": ACTION_DIM, "n_agents": n_agents}, f)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(args) -> None:

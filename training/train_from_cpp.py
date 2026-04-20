@@ -47,7 +47,7 @@ from training.train_world_model import (
     value_loss,
     ppo_loss,
 )
-from training.train import save_weights, N_AGENTS, EMBED_DIM, ACTION_DIM
+from training.train import save_weights, save_weights_raw, N_AGENTS, EMBED_DIM, ACTION_DIM
 from training.train import H, F, GAMMA, LAM, CLIP_EPS, LR_WORLD, LR_POLICY, LOG_EVERY
 
 POLL_INTERVAL = 0.05   # seconds between sentinel checks - we should/could set up a sigint?
@@ -136,7 +136,7 @@ def _assemble(raw, n_agents, obs_dim, action_dim):
 
 def update(n_agents, episode_len,
            encoder, attn_a, attn_w, world_model_net, policy, critic,
-           transitions, opt_world, opt_policy):
+           transitions, opt_encoder, opt_world, opt_policy):
     T = episode_len
 
     adv_by_agent, ret_by_agent = {}, {}
@@ -175,12 +175,17 @@ def update(n_agents, episode_len,
     advantages_pv = (advantages_pv - advantages_pv.mean()) / (advantages_pv.std() + 1e-8)
     log_probs_old = torch.tensor(lp_list,  dtype=torch.float32)
 
+    # Zero encoder grads once; world-model and policy grads accumulate into it
+    # before a single opt_encoder.step() applies the combined gradient.
+    opt_encoder.zero_grad()
     opt_world.zero_grad()
     lw = world_model_loss(encoder, attn_w, world_model_net,
                           obs_wm, actions_wm, next_obs_wm, rewards_wm)
     lw.backward()
     opt_world.step()
 
+    # Do NOT zero encoder here — its world-model grads must survive into the
+    # policy backward so opt_encoder sees both contributions.
     opt_policy.zero_grad()
     lv       = value_loss(encoder, attn_a, critic, obs_pv, up_pv, returns_pv)
     lp_loss  = ppo_loss(encoder, attn_a, policy,
@@ -188,6 +193,7 @@ def update(n_agents, episode_len,
                         advantages_pv, log_probs_old, CLIP_EPS)
     (lv + lp_loss).backward()
     opt_policy.step()
+    opt_encoder.step()
 
     return {'world_model': lw.item(), 'value': lv.item(), 'policy': lp_loss.item()}
 
@@ -235,14 +241,13 @@ def main(weights_dir: str) -> None:
         except Exception as e:
             print(f"  warning: could not load {name}: {e}")
 
+    opt_encoder = optim.Adam(encoder.parameters(), lr=(LR_WORLD + LR_POLICY) / 2)
     opt_world = optim.Adam(
-        list(encoder.parameters()) +
         list(attn_w.parameters()) +
         list(world_model_net.parameters()),
         lr=LR_WORLD,
     )
     opt_policy = optim.Adam(
-        list(encoder.parameters()) +
         list(attn_a.parameters()) +
         list(policy.parameters()) +
         list(critic.parameters()),
@@ -274,15 +279,15 @@ def main(weights_dir: str) -> None:
         losses = update(
             n_agents, episode_len,
             encoder, attn_a, attn_w, world_model_net, policy, critic,
-            transitions, opt_world, opt_policy,
+            transitions, opt_encoder, opt_world, opt_policy,
         )
 
         ep_reward = sum(tr['reward'] for tr in transitions if tr['agent_id'] == 0)
         reward_history.append(ep_reward)
 
-        # Save updated weights
-        save_weights(weights_dir, obs_dim, n_agents,
-                     encoder, attn_a, attn_w, world_model_net, policy, critic)
+        # Save updated weights as raw binary blob (no TorchScript tracing overhead)
+        save_weights_raw(weights_dir, obs_dim, n_agents,
+                         encoder, attn_a, attn_w, world_model_net, policy, critic)
 
         # Signal C++
         open(wts_ready, 'w').close()

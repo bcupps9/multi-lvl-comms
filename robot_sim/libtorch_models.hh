@@ -56,6 +56,18 @@ struct LibtorchNeuralModels : NeuralModels {
             *m = torch::jit::optimize_for_inference(*m);
         }
 
+        // Keep un-optimised master copies so update_from_blob() can update
+        // parameters in-place without re-loading from disk each episode.
+        master_encoder_     = torch::jit::load((fs::path(weights_dir) / "encoder.pt").string());
+        master_attn_a_      = torch::jit::load((fs::path(weights_dir) / "attn_a.pt").string());
+        master_attn_w_      = torch::jit::load((fs::path(weights_dir) / "attn_w.pt").string());
+        master_world_model_ = torch::jit::load((fs::path(weights_dir) / "world_model.pt").string());
+        master_policy_      = torch::jit::load((fs::path(weights_dir) / "policy.pt").string());
+        master_critic_      = torch::jit::load((fs::path(weights_dir) / "critic.pt").string());
+        for (auto* m : {&master_encoder_, &master_attn_a_, &master_attn_w_,
+                        &master_world_model_, &master_policy_, &master_critic_})
+            m->eval();
+
         // Read dims from config.json
         fs::path cfg_path = fs::path(weights_dir) / "config.json";
         if (!fs::exists(cfg_path))
@@ -211,7 +223,7 @@ struct LibtorchNeuralModels : NeuralModels {
     }
 
 
-    // Reload all modules from disk — call after Python writes updated weights.
+    // Reload all modules from disk — only needed if weights.bin is unavailable.
     void reload(const std::string& weights_dir) {
         namespace fs = std::filesystem;
         auto load = [&](const std::string& name) {
@@ -232,6 +244,54 @@ struct LibtorchNeuralModels : NeuralModels {
         }
     }
 
+    // Fast per-episode weight update: read raw float32 blob written by
+    // save_weights_raw() in Python and copy tensors into master modules in-place,
+    // then rebuild inference-optimised copies via deepcopy + optimize_for_inference.
+    // Avoids re-tracing the TorchScript graph every episode.
+    void update_from_blob(const std::string& weights_dir) {
+        namespace fs = std::filesystem;
+        fs::path p = fs::path(weights_dir) / "weights.bin";
+        std::ifstream f(p, std::ios::binary);
+        if (!f) throw std::runtime_error("cannot open weights.bin: " + p.string());
+
+        uint32_t magic, n_floats;
+        f.read(reinterpret_cast<char*>(&magic),    4);
+        f.read(reinterpret_cast<char*>(&n_floats), 4);
+        if (magic != 0x57544253u)
+            throw std::runtime_error("weights.bin: bad magic");
+
+        std::vector<float> buf(n_floats);
+        f.read(reinterpret_cast<char*>(buf.data()), n_floats * 4);
+
+        // Module order must match Python's save_weights_raw():
+        //   encoder, attn_a, attn_w, world_model, policy, critic
+        size_t offset = 0;
+        for (auto* master : {&master_encoder_, &master_attn_a_, &master_attn_w_,
+                             &master_world_model_, &master_policy_, &master_critic_}) {
+            for (auto param : master->parameters()) {
+                size_t n = static_cast<size_t>(param.numel());
+                auto src = torch::from_blob(buf.data() + offset,
+                                            {static_cast<long>(n)}, torch::kFloat32);
+                param.data().copy_(src.view(param.sizes()));
+                offset += n;
+            }
+        }
+        if (offset != n_floats)
+            throw std::runtime_error("weights.bin: parameter count mismatch");
+
+        // Rebuild inference-optimised copies from updated masters.
+        encoder_     = master_encoder_.deepcopy();
+        attn_a_      = master_attn_a_.deepcopy();
+        attn_w_      = master_attn_w_.deepcopy();
+        world_model_ = master_world_model_.deepcopy();
+        policy_      = master_policy_.deepcopy();
+        critic_      = master_critic_.deepcopy();
+        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_}) {
+            m->eval();
+            *m = torch::jit::optimize_for_inference(*m);
+        }
+    }
+
 private:
     torch::jit::Module encoder_;
     torch::jit::Module attn_a_;
@@ -239,6 +299,14 @@ private:
     torch::jit::Module world_model_;
     torch::jit::Module policy_;
     torch::jit::Module critic_;
+
+    // Master copies kept for in-place parameter updates (not graph-optimised).
+    torch::jit::Module master_encoder_;
+    torch::jit::Module master_attn_a_;
+    torch::jit::Module master_attn_w_;
+    torch::jit::Module master_world_model_;
+    torch::jit::Module master_policy_;
+    torch::jit::Module master_critic_;
 
     int n_agents_;
     int embed_dim_  = 64;

@@ -103,10 +103,11 @@ RUN apt-get update &&\
  python3-venv
 
 # install Python deps from the repo's requirements.txt
-# CPU-only torch wheel — no CUDA needed inside the container
+# Use PyPI as the primary index so general packages like matplotlib resolve
+# normally, and keep the PyTorch CPU wheel index as an extra source for torch.
 COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --break-system-packages \
-    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
     -r /tmp/requirements.txt
 
 # set up default locale

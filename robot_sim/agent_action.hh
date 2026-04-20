@@ -122,6 +122,10 @@ struct Agent {
 
     bool verbose = false;
 
+    // Optional: filled by negotiation_phase each timestep so the harness can
+    // compute per-step intention spread without re-running inference.
+    std::vector<float>* own_intentions = nullptr;
+
     Agent(int id, int obs_dim, int action_dim,
           NeuralModels& models, Environment& env,
           std::vector<transition>& trajectory,

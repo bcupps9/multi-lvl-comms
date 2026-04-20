@@ -528,3 +528,9 @@ struct MyEnv : Environment {
 
 Pass an instance to `Agent` in `seqcomm_sim.cc` — everything else (negotiation,
 launching, trajectory recording) is environment-agnostic.
+
+
+Think about what is so slow:
+It's bad to be writing out for every trajectory step and have two processes coordinating. 
+
+Also in training, we should be doing less steps per gradient update? Or just shorten episodes

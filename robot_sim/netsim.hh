@@ -122,8 +122,8 @@ struct channel {
 private:
     port<T>* destination_ = nullptr;
     unsigned destination_version_ = 0;
-    cot::duration link_delay_ = 5ms; // time for message to arrive
-    cot::duration send_delay_ = 1ms; // time before sender can continue
+    cot::duration link_delay_ = 0ms; // time for message to arrive
+    cot::duration send_delay_ = 0ms; // time before sender can continue
     double loss_ = 0.0;
 
     random_source& randomness_;

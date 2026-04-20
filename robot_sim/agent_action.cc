@@ -145,6 +145,7 @@ cot::task<void> Agent::negotiation_phase(int t, int H, int F) {
 
     // Compute intention (Algorithm 5)
     float intention = co_await compute_intention(neighbor_hs, H, F);
+    if (own_intentions) own_intentions->push_back(intention);
 
     // Round 2 ─ share intention value
     co_await broadcast(pancy::intention_msg{id, intention});
