@@ -61,6 +61,8 @@ class IntersectionCrossingEnv:
         assert cfg.n_agents == 4, "IntersectionCrossingEnv requires exactly 4 agents"
         self.positions:    list = list(self._STARTS)
         self.reached_goal: list = [False] * cfg.n_agents
+        self.last_collisions: int = 0       # collision pairs in last step
+        self.last_goals_this_step: int = 0  # agents that reached goal in last step
 
     # ── Dimensions ────────────────────────────────────────────────────────────
 
@@ -77,6 +79,8 @@ class IntersectionCrossingEnv:
     def reset(self) -> List[np.ndarray]:
         self.positions    = list(self._STARTS)
         self.reached_goal = [False] * self.cfg.n_agents
+        self.last_collisions = 0
+        self.last_goals_this_step = 0
         return [self._obs_for(i) for i in range(self.cfg.n_agents)]
 
     def step(self, actions: List[int]) -> Tuple[List[np.ndarray], float, bool]:
@@ -97,17 +101,21 @@ class IntersectionCrossingEnv:
         reward = -self.cfg.step_penalty * self.cfg.n_agents
 
         # Goal bonus (one-time per agent)
+        self.last_goals_this_step = 0
         for i in range(self.cfg.n_agents):
             if not self.reached_goal[i] and self.positions[i] == self._GOALS[i]:
                 self.reached_goal[i] = True
                 reward += self.cfg.goal_reward
+                self.last_goals_this_step += 1
 
         # Collision penalty (per pair per step)
+        self.last_collisions = 0
         for i in range(self.cfg.n_agents):
             for j in range(i + 1, self.cfg.n_agents):
                 if (not self.reached_goal[i] and not self.reached_goal[j]
                         and self.positions[i] == self.positions[j]):
                     reward -= self.cfg.collision_penalty
+                    self.last_collisions += 1
 
         done = all(self.reached_goal)
         return [self._obs_for(i) for i in range(self.cfg.n_agents)], float(reward), done
