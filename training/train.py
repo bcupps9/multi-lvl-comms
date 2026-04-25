@@ -30,6 +30,7 @@ import torch.optim as optim
 from execution.gaussian_field_env import GaussianFieldEnv, GaussianFieldConfig
 from execution.island_coverage_env import IslandCoverageEnv, IslandCoverageConfig
 from execution.intersection_env import IntersectionCrossingEnv, IntersectionCrossingConfig
+from execution.team_poker_env import TeamPokerEnv, TeamPokerConfig
 from training.train_world_model import (
     ObservationEncoder,
     AttentionModule,
@@ -276,7 +277,7 @@ class EpisodeLogger:
 
 # ── Environment factory ────────────────────────────────────────────────────────
 
-def make_env(name: str, n_agents: int):
+def make_env(name: str, n_agents: int, poker_kwargs: dict | None = None):
     """Return a configured environment and its obs_dim."""
     if name == "gaussian":
         cfg = GaussianFieldConfig(n_agents=n_agents)
@@ -287,7 +288,10 @@ def make_env(name: str, n_agents: int):
     if name == "intersection":
         cfg = IntersectionCrossingConfig(n_agents=n_agents)
         return IntersectionCrossingEnv(cfg)
-    raise ValueError(f"Unknown env '{name}'. Choose 'gaussian', 'coverage', or 'intersection'.")
+    if name == "poker":
+        cfg = TeamPokerConfig(n_agents=n_agents, **(poker_kwargs or {}))
+        return TeamPokerEnv(cfg)
+    raise ValueError(f"Unknown env '{name}'. Choose 'gaussian', 'coverage', 'intersection', or 'poker'.")
 
 
 # ── Rollout ────────────────────────────────────────────────────────────────────
@@ -420,11 +424,16 @@ def run_episode(
             upper_so_far.append((act.squeeze(0), i))
 
         # ── 5. Step environment ───────────────────────────────────────────────
-        n_env_actions = env.action_dim if hasattr(env, 'action_dim') else env.N_ACTIONS
-        env_actions = [
-            int(agent_data[i][0].round().clamp(0, n_env_actions - 1).item())
-            for i in range(n_agents)
-        ]
+        if getattr(env, "continuous_actions", False):
+            # Continuous-action envs (e.g. TeamPokerEnv) apply their own
+            # transform (sigmoid) internally; pass raw policy outputs.
+            env_actions = [agent_data[i][0].item() for i in range(n_agents)]
+        else:
+            n_env_actions = env.action_dim if hasattr(env, "action_dim") else env.N_ACTIONS
+            env_actions = [
+                int(agent_data[i][0].round().clamp(0, n_env_actions - 1).item())
+                for i in range(n_agents)
+            ]
         next_obs_list, reward, done = env.step(env_actions)
 
         # ── 6. Accumulate episode stats ───────────────────────────────────────
@@ -476,6 +485,8 @@ def run_episode(
         "ordering_history":  ordering_history,
         "intention_history": intention_history,
     }
+    if hasattr(env, "poker_stats"):
+        episode_info.update(env.poker_stats())
     return transitions, episode_info
 
 
@@ -653,8 +664,13 @@ def main(args) -> None:
     random.seed(args.seed)
 
     mode_cfg = MODES[args.mode]
-    env      = make_env(args.env, N_AGENTS)
-    obs_dim  = env.obs_dim
+    poker_kwargs = dict(
+        M=args.poker_M, alpha=args.poker_alpha, C_0=args.poker_C0,
+        C_floor=args.poker_floor, C_target=args.poker_target, K_max=args.poker_K,
+        seed=args.seed,
+    ) if args.env == "poker" else None
+    env     = make_env(args.env, N_AGENTS, poker_kwargs=poker_kwargs)
+    obs_dim = env.obs_dim
 
     comm_cfg     = CommConfig(
         delay=args.comm_delay,
@@ -788,9 +804,23 @@ def main(args) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train SeqComm with MAPPO")
     parser.add_argument(
-        "--env", choices=["gaussian", "coverage", "intersection"], default="gaussian",
+        "--env", choices=["gaussian", "coverage", "intersection", "poker"],
+        default="gaussian",
         help="Environment to train on (default: gaussian)",
     )
+    # Team poker parameters (only used when --env poker)
+    parser.add_argument("--poker-M",       type=float, default=2.0,   metavar="M",
+                        help="Win profit multiplier (default: 2.0)")
+    parser.add_argument("--poker-alpha",   type=float, default=0.1,   metavar="A",
+                        help="Consolation fraction on loss (default: 0.1)")
+    parser.add_argument("--poker-C0",      type=float, default=100.0, metavar="C",
+                        help="Starting coffers per agent (default: 100)")
+    parser.add_argument("--poker-floor",   type=float, default=10.0,  metavar="F",
+                        help="Bankruptcy threshold (default: 10)")
+    parser.add_argument("--poker-target",  type=float, default=1000.0,metavar="T",
+                        help="Success threshold (default: 1000)")
+    parser.add_argument("--poker-K",       type=int,   default=150,   metavar="K",
+                        help="Max hands per episode (default: 150)")
     parser.add_argument(
         "--mode", choices=list(MODES), default="seqcomm",
         help=(
