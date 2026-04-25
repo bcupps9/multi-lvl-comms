@@ -19,8 +19,13 @@ multi-lvl-comms/
 │   ├── train_from_cpp.py       Python updater for the C++ ↔ Python training loop
 │   └── train_world_model.py    PyTorch modules, MAPPO losses, GAE, save_weights()
 │
+├── math.md                     Mathematical foundations for the team poker test env
+│
 ├── execution/
-│   └── gaussian_field_env.py   Python mirror of the C++ environment (used during training)
+│   ├── gaussian_field_env.py   Python mirror of the C++ environment (used during training)
+│   ├── island_coverage_env.py  Island coverage coordination environment
+│   ├── intersection_env.py     Intersection crossing environment
+│   └── team_poker_env.py       Team poker environment (SeqComm overgeneralization test)
 │
 ├── weights/                    TorchScript .pt files written by train.py (gitignored if large)
 │
@@ -128,11 +133,19 @@ Uses a Python rollout instead of the C++ sim — faster to iterate on architectu
 changes, but doesn't exercise the real concurrent SeqComm protocol.
 
 Key flags:
-- `--env`          — `gaussian`, `coverage`, or `intersection` (default: gaussian)
+- `--env`          — `gaussian`, `coverage`, `intersection`, or `poker` (default: gaussian)
 - `--mode`         — ablation variant (default: `seqcomm`); see table below
 - `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>[_<comm>]_seed<N>.jsonl`
 - `--seed N`       — fix torch + Python RNG for reproducible runs
 - `--save-every N` — checkpoint weights every N episodes in addition to the final save
+
+Team poker flags (only used with `--env poker`):
+- `--poker-M F`      — win profit multiplier (default: 2.0)
+- `--poker-alpha F`  — consolation fraction on loss α (default: 0.1)
+- `--poker-C0 F`     — starting coffers per agent (default: 100)
+- `--poker-floor F`  — bankruptcy threshold; episode ends if any agent falls below (default: 10)
+- `--poker-target F` — success threshold; episode ends if any agent exceeds (default: 1000)
+- `--poker-K N`      — max hands per episode (default: 150)
 
 Communication stressor flags (all default to perfect/lossless):
 - `--comm-delay N`  — message arrives N steps late; first N steps see zeros
@@ -442,7 +455,67 @@ giving lower agents indirect information about field conditions elsewhere in the
 
 ---
 
-## Environment 2 (roadmap): Archipelago Survival
+## Environment 2: Team Poker (SeqComm overgeneralization test)
+
+The primary environment for demonstrating and measuring the relative overgeneralization problem that SeqComm is designed to solve. See [`math.md`](math.md) for full derivations.
+
+**Setup** — N homogeneous agents (parameter-sharing) play repeated poker hands against a dealer. Each hand is one environment step; each episode is a sequence of hands.
+
+**Per hand:**
+1. Each agent i privately observes hand strength `H_i ~ Uniform[0, 1]`
+2. Team wins iff `H̄ > D` where `H̄ = mean(H_i)` and `D ~ Uniform[0, 1]` (dealer, revealed after bets)
+3. Each agent bets fraction `ρ_i = σ(action_i)` of current coffers `C_i`
+4. Win: `C_i → C_i · (1 + M · ρ_i)` — Lose: `C_i → C_i · (1 + α) · (1 - ρ_i)`
+
+**Observation** `o_i` (length `n_agents + 2`):
+```
+[H_i,  log(C_0/C_0), …, log(C_{N-1}/C_0),  t/K_max]
+```
+`H_i` is private — other agents' hand strengths can only be inferred from their bet sizes in the launching phase. Log-coffers are shared so all agents track episode progress.
+
+**Action** — raw continuous float; sigmoid applied in env so `ρ_i ∈ (0, 1)`.
+
+**Reward** — mean log-growth across agents per hand (shared scalar):
+```
+r = mean_i log(C_i_new / C_i_old)
+```
+
+**Episode terminates** when any agent hits `C_floor` (bankruptcy), any agent hits `C_target` (success), or `K_max` hands have been played.
+
+**What the world model must learn:**
+```
+r̂(H̄, ρ) = ρ · [H̄(M+1+α) - (1+α)]  +  (1-H̄) · α
+```
+A bilinear function of collective hand strength and bet fraction — representable by a single linear layer and learned quickly from experience.
+
+**What SeqComm provides** — the agent with the highest `H_i` produces the highest intention value under a well-trained world model (going first with a strong hand yields higher predicted log-growth). The launching phase lets followers invert the first mover's bet to estimate `H̄` and bet optimally. Agents learn Kelly fractions `ρ*(H̄) = max(0, (H̄(M+1)-1)/M)` rather than binary {0,1} bets, giving dense gradient signals throughout training.
+
+**Why it exposes overgeneralization** — the independent equilibrium threshold for each agent is `θ_ind = N·θ_opt - (N-1)/2`, which falls below zero for N=4 with default parameters. Independent agents therefore always bet, while the optimal policy is to bet proportionally to hand strength. The ordering gap `Δθ = (N-1)(M-1-α)/(2(M+1+α)) ≈ 0.44` for N=4 creates a measurable EV penalty (~9-10%) that vanishes under correct SeqComm ordering.
+
+**Key metrics logged per episode:**
+- `poker_win_rate` — fraction of hands won
+- `poker_mean_bet` — mean bet fraction across hands
+- `poker_bankruptcy` — whether episode ended at `C_floor`
+- `poker_target_hit` — whether episode ended at `C_target`
+- `poker_hands_played` — actual episode length
+- `poker_final_coffers` — per-agent coffer values at termination
+
+**Run the five baseline variants:**
+```bash
+for mode in seqcomm mappo seqcomm_random seqcomm_no_action seqcomm_fixed; do
+  for seed in 0 1 2; do
+    python3 -m training.train \
+      --env poker --mode $mode --seed $seed \
+      --episodes 2000 --log-dir logs/
+  done
+done
+```
+
+Expected result: `seqcomm` drives `poker_bankruptcy` down and `poker_hands_played` up relative to `seqcomm_fixed` and `mappo`, demonstrating that intention-value ordering recovers the coordination value lost to overgeneralization.
+
+---
+
+## Environment 3 (roadmap): Archipelago Survival
 
 *"Keeping things afloat"* — the team must collectively stay alive.
 Coordination is existential rather than purely reward-maximising.
