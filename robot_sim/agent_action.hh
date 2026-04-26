@@ -134,7 +134,8 @@ struct Agent {
 
     // ── Cotamer tasks ─────────────────────────────────────────────────────────
 
-    // Share hidden states, compute H-step intention rollouts, set N_upper/N_lower
+    // Encode obs, compute V(h_i) as ordering signal, set N_upper/N_lower.
+    // H and F params accepted but unused (retained for call-site compatibility).
     cot::task<void> negotiation_phase(int t, int H, int F);
 
     // Wait for upper actions, sample own action, broadcast down, execute
@@ -145,11 +146,6 @@ struct Agent {
 
 private:
     random_source& rng_;
-
-    // Intention calculation: F sampled orderings × H world-model rollout steps
-    cot::task<float> compute_intention(
-        const std::vector<pancy::hidden_state_msg>& neighbor_hs,
-        int H, int F);
 
     // Receive the next message of type MsgT; buffer anything else
     template <typename MsgT>

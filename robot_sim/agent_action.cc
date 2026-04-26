@@ -1,7 +1,4 @@
 #include "agent_action.hh"
-#include <algorithm>
-#include <numeric>
-#include <random>
 #include <print>
 
 namespace seqcomm {
@@ -36,125 +33,40 @@ cot::task<void> Agent::broadcast(pancy::agent_msg msg) {
 }
 
 
-// ── compute_intention ─────────────────────────────────────────────────────────
-//
-//   Algorithm 5: for each of F sampled orderings, simulate H world-model steps.
-//   At each step the full action cascade runs: agents act in sampled priority
-//   order, upper actions flow down, world model predicts (o', r), repeat.
-//   Bootstrap with V at the end of the rollout. Return mean return over F.
-
-cot::task<float> Agent::compute_intention(
-    const std::vector<pancy::hidden_state_msg>& neighbor_hs,
-    int H, int F)
-{
-    constexpr float gamma = 0.99f;
-    float total_return = 0.f;
-
-    // Build lookup: neighbor id → their current hidden state
-    std::unordered_map<int, const std::vector<float>*> h_map;
-    for (auto& nh : neighbor_hs)
-        h_map[nh.sender_id] = &nh.h;
-
-    for (int f = 0; f < F; ++f) {
-        // Sample a random ordering of all clique members
-        auto ordering = clique;
-        // TODO: use rng_ for reproducible shuffles once random_source exposes
-        //       an std::mt19937-compatible interface; placeholder below
-        std::shuffle(ordering.begin(), ordering.end(), rng_.engine());
-
-        float discounted_return = 0.f;
-        float gamma_t = 1.f;
-        std::vector<float> current_obs = obs; // agent's own rolling obs
-
-        for (int step = 0; step < H; ++step) {
-            std::vector<std::vector<float>> all_enc;
-            std::vector<std::vector<float>> all_actions;
-            std::vector<std::vector<float>> upper_actions_for_self;
-
-            bool self_acted = false;
-
-            for (int agent_idx : ordering) {
-                std::vector<float> enc_j;
-                if (agent_idx == id) {
-                    enc_j = models.encode(current_obs);
-                } else {
-                    // Use hidden state shared in negotiation round 1
-                    auto it = h_map.find(agent_idx);
-                    enc_j = (it != h_map.end()) ? *it->second : std::vector<float>(h.size(), 0.f);
-                }
-
-                // upper_actions_for_self accumulates only agents that are
-                // upper relative to self in *this* sampled ordering
-                std::vector<std::vector<float>> upper_for_j =
-                    (agent_idx == id) ? upper_actions_for_self
-                                      : std::vector<std::vector<float>>{};
-
-                auto context_j = models.attention_a(enc_j, upper_for_j);
-                auto [a_j, _lp] = models.policy_sample(context_j);
-
-                all_enc.push_back(enc_j);
-                all_actions.push_back(a_j);
-
-                // Agents before self in this ordering count as its upper agents
-                if (!self_acted && agent_idx != id)
-                    upper_actions_for_self.push_back(a_j);
-                if (agent_idx == id)
-                    self_acted = true;
-            }
-
-            // World-model step: M(AM_w(e(o), a)) → (o'_all_flat, r)
-            auto ctx_w = models.attention_w(all_enc, all_actions);
-            auto [next_obs_flat, reward] = models.world_model(ctx_w);
-
-            discounted_return += gamma_t * reward;
-            gamma_t *= gamma;
-
-            // Advance self's obs (first obs_dim floats of the flat output)
-            current_obs.assign(next_obs_flat.begin(),
-                                next_obs_flat.begin() + obs_dim);
-        }
-
-        // Bootstrap: V(AM_a(e(o_H), {})) — no upper actions at bootstrap
-        auto enc_final = models.encode(current_obs);
-        auto ctx_final = models.attention_a(enc_final, {});
-        float v_final  = models.critic(ctx_final);
-        discounted_return += gamma_t * v_final;
-
-        total_return += discounted_return;
-    }
-
-    co_return total_return / static_cast<float>(F);
-}
-
 
 // ── negotiation_phase ─────────────────────────────────────────────────────────
 //
-//   Round 1: encode obs → h_i, broadcast hidden_state_msg to clique.
-//   Round 2: compute intention via H-step world-model rollouts,
-//            broadcast intention_msg, receive all intentions, set N_upper/N_lower.
+//   Encode obs → h_i, compute intention as V(h_i) (critic value with no
+//   upper context), broadcast scalar intention, receive all, set N_upper/N_lower.
+//
+//   Deliberately shares only the scalar intention — NOT h_i — so the cascade
+//   remains the only inter-agent information channel at execution time.
+//   H_bar can only be inferred from bet sizes, keeping the coordination
+//   problem non-trivial.
+//
+//   Tie-breaking by agent ID ensures a total order even with untrained
+//   (near-uniform) critics, preventing execute_signal deadlock.
 
-cot::task<void> Agent::negotiation_phase(int t, int H, int F) {
-    // Round 1 ─ share encoded hidden state
+cot::task<void> Agent::negotiation_phase(int t, int /*H*/, int /*F*/) {
     h = models.encode(obs);
-    co_await broadcast(pancy::hidden_state_msg{id, h});
 
-    std::vector<pancy::hidden_state_msg> neighbor_hs;
-    neighbor_hs.reserve(clique.size());
-    for (size_t k = 0; k < clique.size(); ++k)
-        neighbor_hs.push_back(co_await receive_typed<pancy::hidden_state_msg>());
-
-    // Compute intention (Algorithm 5)
-    float intention = co_await compute_intention(neighbor_hs, H, F);
+    // Intention proxy: critic value at own state with no upper context.
+    // High H_i → high expected return → high V → correct ordering signal.
+    auto ctx      = models.attention_a(h, {});
+    float intention = models.critic(ctx);
     if (own_intentions) own_intentions->push_back(intention);
 
-    // Round 2 ─ share intention value
     co_await broadcast(pancy::intention_msg{id, intention});
 
     N_upper.clear();
     N_lower.clear();
     for (size_t k = 0; k < clique.size(); ++k) {
         auto msg = co_await receive_typed<pancy::intention_msg>();
-        if (msg.intention > intention)
+        // Tiebreak by agent ID → guaranteed total order even with identical
+        // intentions (e.g. untrained models), preventing deadlock.
+        bool is_upper = msg.intention > intention ||
+            (msg.intention == intention && msg.sender_id > id);
+        if (is_upper)
             N_upper.push_back(msg.sender_id);
         else
             N_lower.push_back(msg.sender_id);
