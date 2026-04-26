@@ -27,7 +27,7 @@ struct PokerConfig {
     float M         = 2.0f;     // net profit multiplier on win
     float alpha     = 0.1f;     // consolation fraction on loss
     float C_0       = 100.0f;   // initial coffers per agent
-    float C_floor   = 10.0f;    // bankruptcy threshold
+    float C_floor   = 1.0f;    // bankruptcy threshold
     float C_target  = 1000.0f;  // success threshold
     int   K_max     = 150;      // max hands per episode
 };

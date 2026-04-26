@@ -141,6 +141,7 @@ std::vector<float> PokerEnv::obs_for(int agent_id) const {
     for (int j = 0; j < N; ++j)
         o.push_back(std::log(coffers_[j] / cfg_.C_0));
     o.push_back(static_cast<float>(t_) / static_cast<float>(cfg_.K_max));
+    std::print("obs_for agent_id={} => [{}]\n", agent_id, o);
     return o;
 }
 

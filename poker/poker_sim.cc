@@ -259,8 +259,10 @@ static CotamerResult run_cotamer_episode(
 
     // Detach per-agent episode tasks
     if (mode == Mode::SEQCOMM) {
-        for (auto& a : agents)
+        for (auto& a : agents) {
             poker_episode_seqcomm(*a, env).detach();
+            std::print("releasing an agent\n");
+        }
     } else {
         auto orderings = precompute_orderings(
             env.config().K_max, N,
