@@ -347,6 +347,8 @@ def run_episode(
         comm_channel.reset()
     transitions: list[dict] = []
 
+    device = next(encoder.parameters()).device
+
     # Per-episode accumulators for logging
     total_reward      = 0.0
     n_collisions      = 0
@@ -359,7 +361,7 @@ def run_episode(
     intention_history = []
 
     for t in range(EPISODE_LEN):
-        obs_tensors = [torch.tensor(o) for o in obs_list]
+        obs_tensors = [torch.tensor(o, device=device) for o in obs_list]
 
         # ── 1. Encode ──────────────────────────────────────────────────────────
         # h is built from clean obs — sensor noise only affects intention rollouts,
@@ -417,7 +419,7 @@ def run_episode(
         upper_so_far: list[tuple[torch.Tensor, int]] = []  # (action, sender_id)
         agent_data: dict[int, tuple] = {}
         for _, i in enumerate(ordering):
-            up_pad = torch.zeros(1, n_agents, ACTION_DIM)
+            up_pad = torch.zeros(1, n_agents, ACTION_DIM, device=device)
             if mode_cfg.share_actions:
                 for l, (ua, sender_id) in enumerate(upper_so_far):
                     if comm_channel is not None:
@@ -454,7 +456,7 @@ def run_episode(
             step_done = t + 1  # 1-indexed steps to completion
 
         obs_all      = torch.stack(obs_tensors, 0)
-        next_obs_all = torch.stack([torch.tensor(o) for o in next_obs_list], 0)
+        next_obs_all = torch.stack([torch.tensor(o, device=device) for o in next_obs_list], 0)
         actions_all  = torch.stack([agent_data[i][0] for i in range(n_agents)], 0)
 
         for i in range(n_agents):
@@ -510,6 +512,8 @@ def update(
     entropy_coeff: float = 0.0,
     max_grad_norm: float = 0.5,
 ) -> dict:
+    device = next(encoder.parameters()).device
+
     # Use actual episode length — episodes can end before EPISODE_LEN (e.g. all
     # agents reach their goal in the intersection env), and indexing with a
     # hardcoded EPISODE_LEN would cause an out-of-bounds error once learning kicks in.
@@ -531,7 +535,7 @@ def update(
     obs_wm      = torch.stack([tr["obs_all"]      for tr in trs_a0])
     actions_wm  = torch.stack([tr["actions_all"]  for tr in trs_a0])
     next_obs_wm = torch.stack([tr["next_obs_all"] for tr in trs_a0])
-    rewards_wm  = torch.tensor([tr["reward"] for tr in trs_a0], dtype=torch.float32)
+    rewards_wm  = torch.tensor([tr["reward"] for tr in trs_a0], dtype=torch.float32, device=device)
 
     # Policy/value batch — iterate over actual transitions, not a hardcoded range
     obs_pv_list, up_list, act_list, ret_list, adv_list, lp_list = [], [], [], [], [], []
@@ -550,10 +554,10 @@ def update(
     obs_pv       = torch.stack(obs_pv_list)
     up_pv        = torch.stack(up_list)
     actions_pv   = torch.stack(act_list)
-    returns_pv   = torch.tensor(ret_list,  dtype=torch.float32)
-    advantages_pv = torch.tensor(adv_list, dtype=torch.float32)
+    returns_pv   = torch.tensor(ret_list,  dtype=torch.float32, device=device)
+    advantages_pv = torch.tensor(adv_list, dtype=torch.float32, device=device)
     advantages_pv = (advantages_pv - advantages_pv.mean()) / (advantages_pv.std() + 1e-8)
-    log_probs_old = torch.tensor(lp_list,  dtype=torch.float32)
+    log_probs_old = torch.tensor(lp_list,  dtype=torch.float32, device=device)
 
     # World model update — equation (4) from paper
     opt_world.zero_grad()
@@ -704,12 +708,15 @@ def main(args) -> None:
           + (f"  H={H_infer}" if H_infer != H else "")
           + (f"  F={F_infer}" if F_infer != F else ""))
 
-    encoder         = ObservationEncoder(obs_dim, EMBED_DIM)
-    attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM)
-    attn_w          = AttentionModule(EMBED_DIM, EMBED_DIM + ACTION_DIM)
-    world_model_net = WorldModel(EMBED_DIM, N_AGENTS, obs_dim)
-    policy          = Policy(EMBED_DIM, ACTION_DIM)
-    critic          = Critic(EMBED_DIM)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+
+    encoder         = ObservationEncoder(obs_dim, EMBED_DIM).to(device)
+    attn_a          = AttentionModule(EMBED_DIM, ACTION_DIM).to(device)
+    attn_w          = AttentionModule(EMBED_DIM, EMBED_DIM + ACTION_DIM).to(device)
+    world_model_net = WorldModel(EMBED_DIM, N_AGENTS, obs_dim).to(device)
+    policy          = Policy(EMBED_DIM, ACTION_DIM).to(device)
+    critic          = Critic(EMBED_DIM).to(device)
 
     opt_world = optim.Adam(
         list(encoder.parameters()) +

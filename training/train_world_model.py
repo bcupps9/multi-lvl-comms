@@ -282,6 +282,7 @@ def compute_intention(
     The critic bootstraps the terminal-state value (eq. in paper:
     v = 1/F * sum_f [sum_t gamma^t * r_t  +  gamma^H * V(s_H)]).
     """
+    device = next(encoder.parameters()).device
     total = 0.0
     for _ in range(F):
         order = torch.randperm(n_agents).tolist()
@@ -293,28 +294,27 @@ def compute_intention(
             upper_so_far: list = []
             sim_actions: dict = {}
             for j in order:
-                up_pad = torch.zeros(1, n_agents, action_dim)
+                up_pad = torch.zeros(1, n_agents, action_dim, device=device)
                 for l, ua in enumerate(upper_so_far):
                     up_pad[0, l] = ua
                 ctx = attn_a(sim_h[j], up_pad)
                 a = policy(ctx).sample().squeeze(0)
                 sim_actions[j] = a
                 upper_so_far.append(a)
-            obs_t  = torch.stack(sim_obs, 0).unsqueeze(0)          # (1, N, obs_dim)
-            enc_t  = encoder(obs_t)                                 # (1, N, embed)
+            obs_t  = torch.stack(sim_obs, 0).unsqueeze(0)
+            enc_t  = encoder(obs_t)
             acts_t = torch.stack(
                 [sim_actions[j] for j in range(n_agents)], 0
-            ).unsqueeze(0)                                          # (1, N, action_dim)
+            ).unsqueeze(0)
             msgs_w = torch.cat([enc_t, acts_t], dim=-1)
             ctx_w  = attn_w(enc_t.mean(1), msgs_w)
-            pred   = world_model_net(ctx_w).squeeze(0)             # (N*obs_dim + 1,)
+            pred   = world_model_net(ctx_w).squeeze(0)
             cum_r += g * pred[-1].item()
             g     *= gamma
             nxt = pred[:-1].detach()
             sim_obs = [nxt[j * obs_dim:(j + 1) * obs_dim] for j in range(n_agents)]
-        # Bootstrap terminal value for agent_i
         h_fin  = encoder(sim_obs[agent_i].unsqueeze(0))
-        up_fin = torch.zeros(1, n_agents, action_dim)
+        up_fin = torch.zeros(1, n_agents, action_dim, device=device)
         cum_r += g * critic(attn_a(h_fin, up_fin)).item()
         total += cum_r
     return total / F
