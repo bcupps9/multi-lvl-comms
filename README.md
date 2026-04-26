@@ -85,7 +85,9 @@ python -m training.train --episodes 100 --save-weights weights/
 **Step 3 — build the C++ training harness:**
 
 ```bash
-cmake -B build -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
+cmake -B build-docker \
+  -DUSE_TORCH=ON \
+  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
 cmake --build build --target seqcomm-sim-trained
 ```
 

@@ -33,18 +33,18 @@ echo "Installing Python dependencies …"
 TORCH_PREFIX=$(.venv/bin/python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
 echo "libtorch prefix: $TORCH_PREFIX"
 
-cmake -B build \
+cmake -B build-local \
     -DUSE_TORCH=ON \
     -DCMAKE_PREFIX_PATH="$TORCH_PREFIX"
 
 # ── 4. Build poker-sim ────────────────────────────────────────────────────────
 echo "Building poker-sim …"
-cmake --build build --target poker-sim
+cmake --build build-local --target poker-sim
 
 echo ""
 echo "Done. Run:"
 echo "  # terminal 1 — C++ simulation"
-echo "  ./build/poker/poker-sim weights/ --mode seqcomm --episodes 2000"
+echo "  ./build-local/poker/poker-sim weights/ --mode seqcomm --episodes 2000"
 echo ""
 echo "  # terminal 2 — Python weight updates"
 echo "  .venv/bin/python3 -m training.train_from_cpp weights/"
