@@ -134,6 +134,35 @@ bool BattleshipEnv::fire_at(bool by_boss, int tr, int tc) {
     return true;
 }
 
+int BattleshipEnv::nearest_live_boss_dist(int tr, int tc) const {
+    int best = INT_MAX;
+    for (const Ship& boss : bosses_) {
+        for (int p = 0; p < 3; ++p) {
+            if (!boss.alive[p]) continue;
+            auto [r, c] = boss.cell_of(p);
+            int d = std::max(std::abs(r - tr), std::abs(c - tc));
+            best = std::min(best, d);
+        }
+    }
+    return best;
+}
+
+float BattleshipEnv::near_boss_reward(int tr, int tc) const {
+    int M = cfg_.M;
+    if (cfg_.reward_near_boss == 0.f ||
+        tr < 0 || tr >= M || tc < 0 || tc >= M ||
+        cfg_.fire_range <= 0) {
+        return 0.f;
+    }
+
+    int d = nearest_live_boss_dist(tr, tc);
+    if (d <= 0 || d > cfg_.fire_range) return 0.f;
+
+    float closeness = static_cast<float>(cfg_.fire_range + 1 - d) /
+                      static_cast<float>(cfg_.fire_range);
+    return cfg_.reward_near_boss * closeness;
+}
+
 // ── Action decoding ────────────────────────────────────────────────────────────
 
 int BattleshipEnv::decode_move(float a) {
@@ -220,9 +249,13 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         move_ship(agents_[i], DR[dir], DC[dir]);
 
         auto [fdr, fdc] = decode_fire(a[1], a[2], cfg_.fire_range);
-        if (fire_at(false, agents_[i].cr + fdr, agents_[i].cc + fdc)) {
+        int tr = agents_[i].cr + fdr;
+        int tc = agents_[i].cc + fdc;
+        if (fire_at(false, tr, tc)) {
             reward += cfg_.reward_hit_boss;
             ++ep_boss_hits_;
+        } else {
+            reward += near_boss_reward(tr, tc);
         }
     }
 

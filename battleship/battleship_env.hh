@@ -45,6 +45,7 @@ struct BattleshipConfig {
     float reward_hit_boss   =  1.f;
     float reward_hit_self   = -1.f;
     float reward_survive    =  0.05f;  // per agent cell alive per step (survival signal)
+    float reward_near_boss  =  0.20f;  // shaped reward for near-miss agent shots
 };
 
 // ── Grid cell ──────────────────────────────────────────────────────────────────
@@ -147,6 +148,8 @@ private:
     bool try_place(Ship& s, bool is_boss);
     void move_ship(Ship& s, int dr, int dc);
     bool fire_at(bool by_boss, int tr, int tc);   // true = hit
+    int  nearest_live_boss_dist(int tr, int tc) const;
+    float near_boss_reward(int tr, int tc) const;
 
     // Decode continuous action to integer
     static int               decode_move(float a);

@@ -325,6 +325,10 @@ static void write_meta(std::ofstream& f, Mode mode,
       << "\"sight_range\": " << cfg.sight_range << ", "
       << "\"fire_range\": " << cfg.fire_range << ", "
       << "\"max_steps\": " << cfg.max_steps << ", "
+      << "\"reward_hit_boss\": " << jn(cfg.reward_hit_boss) << ", "
+      << "\"reward_hit_self\": " << jn(cfg.reward_hit_self) << ", "
+      << "\"reward_survive\": " << jn(cfg.reward_survive) << ", "
+      << "\"reward_near_boss\": " << jn(cfg.reward_near_boss) << ", "
       << "\"episodes\": " << n_ep << ", "
       << "\"timestamp\": \"" << now_iso() << "\""
       << "}}\n";
@@ -375,13 +379,16 @@ int main(int argc, char* argv[]) {
         else if (arg == "--fire"     && i+1<argc) bcfg.fire_range  = std::stoi(argv[++i]);
         else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
         else if (arg == "--survive"  && i+1<argc) bcfg.reward_survive = std::stof(argv[++i]);
+        else if (arg == "--near-boss" && i+1<argc) bcfg.reward_near_boss = std::stof(argv[++i]);
         else if (arg == "--no-survive")           bcfg.reward_survive = 0.f;
+        else if (arg == "--no-near-boss")         bcfg.reward_near_boss = 0.f;
         else if (arg[0] != '-')                   weights_dir = arg;
         else {
             std::print(stderr,
                 "usage: battleship-sim [<weights_dir>] [--mode seqcomm|fixed_order|mappo]\n"
                 "  [--episodes N] [--no-train] [--seed N] [--log-dir PATH]\n"
-                "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n");
+                "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n"
+                "  [--survive R] [--near-boss R] [--no-survive] [--no-near-boss]\n");
             return 1;
         }
     }
@@ -435,9 +442,10 @@ int main(int argc, char* argv[]) {
     write_meta(log_file, mode, bcfg, n_ep);
 
     std::print("battleship-sim  mode={}  M={}  agents={}  boss={}  sight={}  fire={}  "
-               "steps={}  episodes={}\nlog: {}\n\n",
+               "steps={}  near_boss={}  episodes={}\nlog: {}\n\n",
                mode_str(mode), bcfg.M, bcfg.n_agents, bcfg.n_boss,
-               bcfg.sight_range, bcfg.fire_range, bcfg.max_steps, n_ep,
+               bcfg.sight_range, bcfg.fire_range, bcfg.max_steps,
+               bcfg.reward_near_boss, n_ep,
                log_path.string());
 
     float reward_sum = 0.f;

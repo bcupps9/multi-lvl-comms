@@ -5,8 +5,8 @@ Collaborative Battleship: N_a agent ships vs N_b boss ships on an M×M grid.
 The boss uses a fixed C++ heuristic (no neural training). We train agent
 policy and world model only.
 
-Architecture (Appendix D.2 of SeqComm paper):
-    Encoder    : Linear → tanh → Linear → tanh   (obs_dim → embed_dim)
+Architecture (Appendix D.2 of SeqComm paper, with a spatial battleship encoder):
+    Encoder    : Conv2d stack over local grid + scalar head  (obs_dim → embed_dim)
     AttentionA : scaled dot-product attention over upper actions
     AttentionW : scaled dot-product attention over (enc_obs, action) pairs
     Policy     : Linear → tanh → (mean, log_std)  (embed_dim → action_dim)
@@ -67,20 +67,68 @@ POLL_INTERVAL = 0.05  # seconds
 # ── Neural modules ────────────────────────────────────────────────────────────
 
 class Encoder(nn.Module):
-    """e(o): raw observation → hidden state h.  FC→tanh→FC→tanh."""
+    """
+    e(o): raw observation → hidden state h.
+
+    Battleship observations are a local spatial patch, not an unordered feature
+    vector: 9x9 cells x [own, ally, boss] plus two scalars by default.  The conv
+    stack lets the policy learn "boss at offset (dr, dc)" patterns directly.
+    """
 
     def __init__(self, obs_dim: int, embed_dim: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, embed_dim),
+        self.obs_dim = obs_dim
+        self.embed_dim = embed_dim
+        self.channels = 3
+        self.scalar_dim = 2
+
+        spatial_dim = obs_dim - self.scalar_dim
+        patch_cells = spatial_dim // self.channels
+        patch = math.isqrt(patch_cells)
+        if spatial_dim <= 0 or spatial_dim % self.channels != 0 or patch * patch != patch_cells:
+            raise ValueError(
+                f'Battleship obs_dim={obs_dim} is not patch*patch*3 + {self.scalar_dim}')
+
+        self.patch = patch
+        self.spatial_dim = spatial_dim
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(self.channels, 16, kernel_size=3, padding=1),
+            nn.Tanh(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Tanh(),
+            nn.Flatten(),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(32 * patch * patch + self.scalar_dim, embed_dim),
             nn.Tanh(),
             nn.Linear(embed_dim, embed_dim),
             nn.Tanh(),
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        # obs: (..., obs_dim) → (..., embed_dim)
-        return self.net(obs)
+        # obs: (obs_dim), (B, obs_dim), or (B, N, obs_dim)
+        original_dim = obs.dim()
+        if original_dim == 1:
+            flat = obs.unsqueeze(0)
+        elif original_dim == 2:
+            flat = obs
+        else:
+            flat = obs.reshape(-1, self.obs_dim)
+
+        spatial = flat[:, :self.spatial_dim]
+        scalars = flat[:, self.spatial_dim:]
+        x = spatial.reshape(-1, self.patch, self.patch, self.channels)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        h = self.conv(x)
+        h = torch.cat([h, scalars], dim=-1)
+        h = self.head(h)
+
+        if original_dim == 1:
+            return h.squeeze(0)
+        if original_dim == 2:
+            return h
+        return h.reshape(obs.size(0), obs.size(1), self.embed_dim)
 
 
 class AttentionModule(nn.Module):
