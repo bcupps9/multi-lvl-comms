@@ -111,6 +111,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log-dir", default="logs/baseline")
     parser.add_argument("--out",     default="figures/baseline.png")
+    parser.add_argument("--max-ep",  type=int, default=None,
+                        help="Truncate to the first N episodes (default: all)")
     args = parser.parse_args()
 
     runs = load_logs(args.log_dir)
@@ -121,6 +123,10 @@ def main():
     print(f"Loaded modes: {list(runs.keys())}")
     for mode, seeds in runs.items():
         print(f"  {mode}: {len(seeds)} seed(s), {len(seeds[0])} episodes each")
+
+    if args.max_ep is not None:
+        for mode in runs:
+            runs[mode] = [seed[:args.max_ep] for seed in runs[mode]]
 
     reward_data    = extract(runs, "total_reward")
     success_data   = extract(runs, "success")

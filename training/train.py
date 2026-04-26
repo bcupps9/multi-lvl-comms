@@ -27,6 +27,12 @@ from dataclasses import dataclass
 import torch
 import torch.optim as optim
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 from execution.gaussian_field_env import GaussianFieldEnv, GaussianFieldConfig
 from execution.island_coverage_env import IslandCoverageEnv, IslandCoverageConfig
 from execution.intersection_env import IntersectionCrossingEnv, IntersectionCrossingConfig
@@ -52,7 +58,7 @@ EMBED_DIM   = 64
 ACTION_DIM  = 1     # continuous output, rounded to discrete env action
 H           = 5     # world-model rollout horizon
 F           = 4     # random orderings per intention estimate
-EPISODE_LEN = 200
+EPISODE_LEN = 200  # overridden by --episode-len at runtime
 N_EPISODES  = 2000
 GAMMA       = 0.99
 LAM         = 0.95
@@ -235,14 +241,15 @@ class EpisodeLogger:
         intention_history = info["intention_history"]  # list[list[float]]
         n_steps           = len(ordering_history)
 
-        # Who was first mover each step?
         first_movers = [order[0] for order in ordering_history]
         n_agents = len(ordering_history[0]) if ordering_history else 4
         first_mover_counts = [first_movers.count(i) for i in range(n_agents)]
 
-        # Entropy of the first-mover distribution across the episode
-        probs = [c / n_steps for c in first_mover_counts if c > 0]
-        order_entropy = -sum(p * math.log(p) for p in probs) if probs else 0.0
+        # Use pre-computed entropy if available (avoids duplicate work with wandb path).
+        order_entropy = info.get("_order_entropy") or (
+            -sum(p * math.log(p) for p in [c / n_steps for c in first_mover_counts if c > 0])
+            if any(c > 0 for c in first_mover_counts) else 0.0
+        )
 
         # Per-step std of intention values → how differentiated agents are
         intention_stds = [
@@ -259,6 +266,8 @@ class EpisodeLogger:
             "deadlock":              info["deadlock"],
             "n_collisions":          info["n_collisions"],
             "n_goals_reached":       info["n_goals_reached"],
+            "coverage_rate":         round(info["coverage_rate"], 4),
+            "n_overlaps":            info["n_overlaps"],
             "n_msgs_dropped":        info["n_msgs_dropped"],
             "order_entropy":         round(order_entropy, 4),
             "mean_intention_spread": round(mean_intention_spread, 4),
@@ -266,6 +275,7 @@ class EpisodeLogger:
             "world_model_loss":      round(losses["world_model"], 6),
             "value_loss":            round(losses["value"], 6),
             "policy_loss":           round(losses["policy"], 6),
+            "policy_entropy":        round(losses.get("entropy", 0.0), 6),
         }
         self._f.write(json.dumps(record) + "\n")
         self._f.flush()
@@ -341,6 +351,8 @@ def run_episode(
     total_reward      = 0.0
     n_collisions      = 0
     n_goals_reached   = 0
+    coverage_sum      = 0    # sum of per-step coverage counts (islands with exactly 1 agent)
+    n_overlaps        = 0    # total extra agents on doubled-up islands across the episode
     step_done         = EPISODE_LEN
     done              = False
     ordering_history  = []
@@ -433,6 +445,10 @@ def run_episode(
             n_collisions += env.last_collisions
         if hasattr(env, 'last_goals_this_step'):
             n_goals_reached += env.last_goals_this_step
+        if hasattr(env, 'last_coverage_count'):
+            coverage_sum += env.last_coverage_count
+        if hasattr(env, 'last_overlap_count'):
+            n_overlaps += env.last_overlap_count
 
         if done and step_done == EPISODE_LEN:
             step_done = t + 1  # 1-indexed steps to completion
@@ -465,6 +481,8 @@ def run_episode(
                 intention_history.append([float(v) for v in intentions])
             break
 
+    n_islands = getattr(getattr(env, 'cfg', None), 'n_islands', 0)
+    actual_steps = len(ordering_history)
     episode_info = {
         "total_reward":      total_reward,
         "success":           done,
@@ -472,6 +490,8 @@ def run_episode(
         "deadlock":          step_done == EPISODE_LEN,
         "n_collisions":      n_collisions,
         "n_goals_reached":   n_goals_reached,
+        "coverage_rate":     coverage_sum / (n_islands * actual_steps) if n_islands > 0 else 0.0,
+        "n_overlaps":        n_overlaps,
         "n_msgs_dropped":    comm_channel.n_dropped if comm_channel is not None else 0,
         "ordering_history":  ordering_history,
         "intention_history": intention_history,
@@ -487,6 +507,8 @@ def update(
     transitions: list[dict],
     opt_world: torch.optim.Optimizer,
     opt_policy: torch.optim.Optimizer,
+    entropy_coeff: float = 0.0,
+    max_grad_norm: float = 0.5,
 ) -> dict:
     # Use actual episode length — episodes can end before EPISODE_LEN (e.g. all
     # agents reach their goal in the intersection env), and indexing with a
@@ -538,18 +560,29 @@ def update(
     lw = world_model_loss(encoder, attn_w, world_model_net,
                           obs_wm, actions_wm, next_obs_wm, rewards_wm)
     lw.backward()
+    world_params = [p for g in opt_world.param_groups for p in g["params"]]
+    torch.nn.utils.clip_grad_norm_(world_params, max_grad_norm)
     opt_world.step()
 
     # Value + policy update — equations (2) and (3) from paper
     opt_policy.zero_grad()
     lv = value_loss(encoder, attn_a, critic, obs_pv, up_pv, returns_pv)
-    lp_loss = ppo_loss(encoder, attn_a, policy,
-                       obs_pv[:, 0], up_pv, actions_pv,
-                       advantages_pv, log_probs_old, CLIP_EPS)
-    (lv + lp_loss).backward()
+    lp_loss, entropy = ppo_loss(encoder, attn_a, policy,
+                                obs_pv[:, 0], up_pv, actions_pv,
+                                advantages_pv, log_probs_old, CLIP_EPS,
+                                return_entropy=True)
+    total_policy_loss = lv + lp_loss - entropy_coeff * entropy
+    total_policy_loss.backward()
+    policy_params = [p for g in opt_policy.param_groups for p in g["params"]]
+    torch.nn.utils.clip_grad_norm_(policy_params, max_grad_norm)
     opt_policy.step()
 
-    return {"world_model": lw.item(), "value": lv.item(), "policy": lp_loss.item()}
+    return {
+        "world_model": lw.item(),
+        "value":       lv.item(),
+        "policy":      lp_loss.item(),
+        "entropy":     entropy.item(),
+    }
 
 
 # ── Weight export ──────────────────────────────────────────────────────────────
@@ -620,6 +653,10 @@ def save_weights(
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(args) -> None:
+    global EPISODE_LEN
+    if args.episode_len is not None:
+        EPISODE_LEN = args.episode_len
+
     # ── Reproducibility ───────────────────────────────────────────────────────
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -639,6 +676,22 @@ def main(args) -> None:
 
     H_infer = args.wm_H
     F_infer = args.wm_F
+
+    use_wandb = args.wandb and _WANDB_AVAILABLE
+    if args.wandb and not _WANDB_AVAILABLE:
+        print("Warning: --wandb requested but wandb is not installed. Skipping.")
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=f"{args.env}_{args.mode}_seed{args.seed}",
+            config={
+                "env": args.env, "mode": args.mode, "seed": args.seed,
+                "episodes": args.episodes, "episode_len": EPISODE_LEN,
+                "wm_H": H_infer, "wm_F": F_infer,
+                "embed_dim": EMBED_DIM, "lr_world": LR_WORLD, "lr_policy": LR_POLICY,
+            },
+            tags=[args.env, args.mode],
+        )
 
     print(f"Training [{args.mode}] on '{args.env}' env | "
           f"obs_dim={obs_dim}  embed_dim={EMBED_DIM}  action_dim={ACTION_DIM}  "
@@ -700,7 +753,7 @@ def main(args) -> None:
             "n_agents":   N_AGENTS,
             "obs_dim":    obs_dim,
             "embed_dim":  EMBED_DIM,
-            "episodes":   args.episodes,
+            "episodes":    args.episodes,
             "episode_len": EPISODE_LEN,
             "H_train":    H,
             "F_train":    F,
@@ -714,6 +767,12 @@ def main(args) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for ep in range(args.episodes):
+        # Entropy coefficient: linear decay from args.entropy_coeff → 0
+        if args.entropy_decay_eps > 0:
+            ec = args.entropy_coeff * max(0.0, 1.0 - ep / args.entropy_decay_eps)
+        else:
+            ec = args.entropy_coeff
+
         transitions, episode_info = run_episode(
             env, N_AGENTS, obs_dim,
             encoder, attn_a, attn_w, world_model_net, policy, critic,
@@ -726,10 +785,36 @@ def main(args) -> None:
         losses = update(
             N_AGENTS, encoder, attn_a, attn_w, world_model_net, policy, critic,
             transitions, opt_world, opt_policy,
+            entropy_coeff=ec,
+            max_grad_norm=args.max_grad_norm,
         )
+
+        # Compute order entropy here so both logger and wandb can use it.
+        oh = episode_info["ordering_history"]
+        n_steps_ep = len(oh)
+        first_movers = [o[0] for o in oh]
+        fm_counts = [first_movers.count(i) for i in range(N_AGENTS)]
+        probs = [c / n_steps_ep for c in fm_counts if c > 0]
+        order_entropy = -sum(p * math.log(p) for p in probs) if probs else 0.0
+        episode_info["_order_entropy"] = order_entropy  # passed through to logger
 
         if logger:
             logger.log(ep, episode_info, losses)
+
+        if use_wandb:
+            wandb.log({
+                "reward":         episode_info["total_reward"],
+                "coverage_rate":  episode_info["coverage_rate"],
+                "n_overlaps":     episode_info["n_overlaps"],
+                "n_collisions":   episode_info["n_collisions"],
+                "success":        int(episode_info["success"]),
+                "order_entropy":  order_entropy,
+                "policy_entropy": losses["entropy"],
+                "entropy_coeff":  ec,
+                "wm_loss":        losses["world_model"],
+                "value_loss":     losses["value"],
+                "policy_loss":    losses["policy"],
+            }, step=ep)
 
         if ep % LOG_EVERY == 0:
             success_str = "✓" if episode_info["success"] else f"t={episode_info['steps_to_completion']}"
@@ -755,6 +840,9 @@ def main(args) -> None:
 
     if logger:
         logger.close()
+
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
@@ -794,6 +882,11 @@ if __name__ == "__main__":
         "--seed", type=int, default=0,
         help="Random seed for reproducibility (default: 0)",
     )
+    parser.add_argument(
+        "--episode-len", type=int, default=None,
+        help="Override EPISODE_LEN (default: 200). Shorter episodes speed up "
+             "seqcomm by reducing compute_intention calls; coverage_rate stays comparable.",
+    )
     # Communication stressors — all default to perfect (no degradation)
     parser.add_argument(
         "--comm-delay", type=int, default=0, metavar="N",
@@ -819,6 +912,30 @@ if __name__ == "__main__":
             "compute_intention. Simulates sensor noise unseen during training. "
             "Does NOT affect the env step or training gradients. (default: 0.0)"
         ),
+    )
+    parser.add_argument(
+        "--entropy-coeff", type=float, default=0.01, metavar="C",
+        help="Entropy regularisation coefficient (default: 0.01). Decays linearly "
+             "to 0 over the first --entropy-decay-eps episodes to allow ordering "
+             "to stabilise once the world model is useful.",
+    )
+    parser.add_argument(
+        "--entropy-decay-eps", type=int, default=150, metavar="N",
+        help="Episodes over which entropy coeff decays from --entropy-coeff to 0 "
+             "(default: 150). Set to 0 to use a fixed coefficient throughout.",
+    )
+    parser.add_argument(
+        "--max-grad-norm", type=float, default=0.5, metavar="G",
+        help="Max gradient norm for clipping in both optimisers (default: 0.5). "
+             "Set to 0 to disable clipping.",
+    )
+    parser.add_argument(
+        "--wandb", action="store_true",
+        help="Log metrics to Weights & Biases (requires wandb installed and logged in)",
+    )
+    parser.add_argument(
+        "--wandb-project", default="multi-lvl-comms",
+        help="W&B project name (default: multi-lvl-comms)",
     )
     parser.add_argument(
         "--wm-H", type=int, default=H, metavar="N",

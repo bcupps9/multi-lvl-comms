@@ -231,10 +231,15 @@ def ppo_loss(
     advantages: torch.Tensor,    # (batch,)  GAE A_{pi_old}
     log_probs_old: torch.Tensor, # (batch,)
     clip_eps: float = 0.2,
-) -> torch.Tensor:
+    return_entropy: bool = False,
+) -> "torch.Tensor | tuple[torch.Tensor, torch.Tensor]":
     """
     Equation (3): L(theta_pi) = (1/KT) sum min(ratio*A, g(eps,A))
     where g(eps,A) = (1+eps)*A if A>=0 else (1-eps)*A
+
+    If return_entropy=True, also returns mean policy entropy (for regularisation).
+    All other callers use the default return_entropy=False so their signatures
+    are unchanged.
     """
     h_self = encoder(obs)
     context = attn_a(h_self, upper_actions)
@@ -244,7 +249,12 @@ def ppo_loss(
     ratio = (log_probs - log_probs_old).exp()
     clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
     surrogate = torch.min(ratio * advantages, clipped * advantages)
-    return -surrogate.mean()
+    loss = -surrogate.mean()
+
+    if return_entropy:
+        entropy = dist.entropy().mean()
+        return loss, entropy
+    return loss
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────

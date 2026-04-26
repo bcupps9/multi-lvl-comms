@@ -46,6 +46,8 @@ class IslandCoverageConfig:
     cover_penalty:   float = 0.5    # penalty per uncovered island per step
     overlap_penalty: float = 0.5    # penalty per extra agent on a doubly-occupied island
     randomize_islands: bool = False  # re-randomize island positions each episode
+    proximity_scale: float = 0.05   # shaping bonus per agent per step for being near any island
+                                    # set to 0.0 to disable; keeps gradient non-zero before islands reached
 
 
 class IslandCoverageEnv:
@@ -121,14 +123,34 @@ class IslandCoverageEnv:
 
         # Reward:  +1 per covered island, -penalty for uncovered, -overlap
         reward = 0.0
+        coverage_count = 0
+        overlap_count = 0
         for k in range(self.cfg.n_islands):
             c = int(island_counts[k])
             if c == 0:
                 reward -= self.cfg.cover_penalty
             else:
                 reward += 1.0
+                coverage_count += 1
                 if c > 1:
-                    reward -= self.cfg.overlap_penalty * (c - 1)
+                    extra = c - 1
+                    reward -= self.cfg.overlap_penalty * extra
+                    overlap_count += extra
+
+        self.last_coverage_count = coverage_count  # islands with exactly 1 agent
+        self.last_overlap_count = overlap_count    # extra agents on doubled-up islands
+
+        # Proximity shaping: small per-agent bonus proportional to closeness to nearest island.
+        # Normalized by 2*G so the maximum bonus per step across all agents is proximity_scale.
+        if self.cfg.proximity_scale > 0.0:
+            G = self.cfg.grid_size
+            for i in range(self.cfg.n_agents):
+                min_dist = min(
+                    int(abs(self.positions[i, 0] - self._island_positions[k, 0]) +
+                        abs(self.positions[i, 1] - self._island_positions[k, 1]))
+                    for k in range(self.cfg.n_islands)
+                )
+                reward += self.cfg.proximity_scale * (1.0 - min_dist / (2.0 * G))
 
         obs = [self._obs_for(i) for i in range(self.cfg.n_agents)]
         return obs, float(reward), False
