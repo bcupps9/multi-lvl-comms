@@ -292,7 +292,8 @@ def make_env(name: str, n_agents: int):
         cfg = GaussianFieldConfig(n_agents=n_agents)
         return GaussianFieldEnv(cfg)
     if name == "coverage":
-        cfg = IslandCoverageConfig(n_agents=n_agents, n_islands=n_agents)
+        cfg = IslandCoverageConfig(n_agents=n_agents, n_islands=n_agents,
+                                   grid_size=8, proximity_scale=0.15)
         return IslandCoverageEnv(cfg)
     if name == "intersection":
         cfg = IntersectionCrossingConfig(n_agents=n_agents)
