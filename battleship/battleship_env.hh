@@ -44,8 +44,9 @@ struct BattleshipConfig {
     int   max_steps   = 60;   // episode cap
     float reward_hit_boss   =  1.f;
     float reward_hit_self   = -1.f;
-    float reward_survive    =  0.05f;  // per agent cell alive per step (survival signal)
+    float reward_survive    =  0.005f; // per agent cell alive per step (small stabilizer)
     float reward_near_boss  =  0.20f;  // shaped reward for near-miss agent shots
+    float reward_agents_win = 10.f;    // terminal reward for sinking all boss ships
 };
 
 // ── Grid cell ──────────────────────────────────────────────────────────────────

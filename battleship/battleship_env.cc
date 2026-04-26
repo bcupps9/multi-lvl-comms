@@ -276,8 +276,6 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
             reward += cfg_.reward_survive * a.hp();
     }
 
-    step_reward_ = reward;
-    ep_reward_  += reward;
     ++step_;
 
     bool all_boss  = std::all_of(bosses_.begin(), bosses_.end(),
@@ -285,6 +283,11 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
     bool all_agent = std::all_of(agents_.begin(), agents_.end(),
                                  [](const Ship& s){ return s.sunk(); });
     done_ = all_boss || all_agent || step_ >= cfg_.max_steps;
+    if (all_boss)
+        reward += cfg_.reward_agents_win;
+
+    step_reward_ = reward;
+    ep_reward_  += reward;
 
     for (int i = 0; i < cfg_.n_agents; ++i)
         next_obs_[i] = obs_for(i);

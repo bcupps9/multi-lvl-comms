@@ -329,6 +329,7 @@ static void write_meta(std::ofstream& f, Mode mode,
       << "\"reward_hit_self\": " << jn(cfg.reward_hit_self) << ", "
       << "\"reward_survive\": " << jn(cfg.reward_survive) << ", "
       << "\"reward_near_boss\": " << jn(cfg.reward_near_boss) << ", "
+      << "\"reward_agents_win\": " << jn(cfg.reward_agents_win) << ", "
       << "\"episodes\": " << n_ep << ", "
       << "\"timestamp\": \"" << now_iso() << "\""
       << "}}\n";
@@ -380,6 +381,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
         else if (arg == "--survive"  && i+1<argc) bcfg.reward_survive = std::stof(argv[++i]);
         else if (arg == "--near-boss" && i+1<argc) bcfg.reward_near_boss = std::stof(argv[++i]);
+        else if (arg == "--win-reward" && i+1<argc) bcfg.reward_agents_win = std::stof(argv[++i]);
         else if (arg == "--no-survive")           bcfg.reward_survive = 0.f;
         else if (arg == "--no-near-boss")         bcfg.reward_near_boss = 0.f;
         else if (arg[0] != '-')                   weights_dir = arg;
@@ -388,7 +390,8 @@ int main(int argc, char* argv[]) {
                 "usage: battleship-sim [<weights_dir>] [--mode seqcomm|fixed_order|mappo]\n"
                 "  [--episodes N] [--no-train] [--seed N] [--log-dir PATH]\n"
                 "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n"
-                "  [--survive R] [--near-boss R] [--no-survive] [--no-near-boss]\n");
+                "  [--survive R] [--near-boss R] [--win-reward R]\n"
+                "  [--no-survive] [--no-near-boss]\n");
             return 1;
         }
     }
@@ -442,10 +445,11 @@ int main(int argc, char* argv[]) {
     write_meta(log_file, mode, bcfg, n_ep);
 
     std::print("battleship-sim  mode={}  M={}  agents={}  boss={}  sight={}  fire={}  "
-               "steps={}  near_boss={}  episodes={}\nlog: {}\n\n",
+               "steps={}  survive={}  near_boss={}  win_reward={}  episodes={}\nlog: {}\n\n",
                mode_str(mode), bcfg.M, bcfg.n_agents, bcfg.n_boss,
                bcfg.sight_range, bcfg.fire_range, bcfg.max_steps,
-               bcfg.reward_near_boss, n_ep,
+               bcfg.reward_survive, bcfg.reward_near_boss,
+               bcfg.reward_agents_win, n_ep,
                log_path.string());
 
     float reward_sum = 0.f;
@@ -453,11 +457,9 @@ int main(int argc, char* argv[]) {
 
     for (int ep = 0; ep < n_ep; ++ep) {
         BsEpStats stats;
-        std::vector<transition>* traj_out = nullptr;
 
         if (mode == Mode::MAPPO) {
-            stats    = run_sync_episode(env, *models, sync_traj);
-            traj_out = &sync_traj;
+            stats = run_sync_episode(env, *models, sync_traj);
         } else {
             auto res = run_cotamer_episode(env, *models, rng, mode);
             stats    = res.stats;
