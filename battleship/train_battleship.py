@@ -53,12 +53,13 @@ OBS_DIM    = 245   # (2*4+1)^2 * 3 + 2  — local 9x9 patch * 3 channels + 2 sca
 ACTION_DIM = 3     # (move_dir, fire_dr, fire_dc)
 EMBED_DIM  = 64
 
-GAMMA    = 0.99
-LAM      = 0.95
-CLIP_EPS = 0.2
-LR_ENC   = 1e-4
-LR_WORLD = 3e-4
-LR_POL   = 3e-4
+GAMMA       = 0.99
+LAM         = 0.95
+CLIP_EPS    = 0.2
+ENTROPY_COEF = 0.01   # encourages exploration; prevents policy collapse
+LR_ENC      = 1e-4
+LR_WORLD    = 3e-4
+LR_POL      = 1e-3    # higher than WM — policy needs stronger signal
 
 LOG_EVERY    = 20
 POLL_INTERVAL = 0.05  # seconds
@@ -330,15 +331,18 @@ def loss_value(encoder, attn_a, critic,
 
 def loss_policy(encoder, attn_a, policy,
                 obs_self, up_pv, actions_taken,
-                advantages, log_probs_old, clip_eps=CLIP_EPS):
-    """Eq 3: PPO-clip surrogate loss."""
+                advantages, log_probs_old, clip_eps=CLIP_EPS,
+                entropy_coef=ENTROPY_COEF):
+    """Eq 3: PPO-clip surrogate + entropy bonus."""
     h = encoder(obs_self)                  # (B, embed)
     ctx = attn_a(h, up_pv)               # (B, embed)
     dist = policy(ctx)
     log_probs = dist.log_prob(actions_taken).sum(dim=-1)   # (B,)
+    entropy = dist.entropy().sum(dim=-1).mean()             # scalar
     ratio = (log_probs - log_probs_old).exp()
     clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-    return -torch.min(ratio * advantages, clipped * advantages).mean()
+    surrogate = -torch.min(ratio * advantages, clipped * advantages).mean()
+    return surrogate - entropy_coef * entropy, entropy.item()
 
 
 def loss_world_model(encoder, attn_w, world_model,
@@ -424,14 +428,14 @@ def update_episode(transitions, n_agents, nets,
     # Encoder grads from world-model survive here; policy adds its own below.
     opt_pol.zero_grad()
     lv = loss_value(encoder, attn_a, critic, obs_pv, up_pv, returns_pv)
-    lp = loss_policy(encoder, attn_a, policy,
-                     obs_self_pv, up_pv, actions_pv,
-                     adv_pv, lp_old_pv)
+    lp, entropy = loss_policy(encoder, attn_a, policy,
+                              obs_self_pv, up_pv, actions_pv,
+                              adv_pv, lp_old_pv)
     (lv + lp).backward()
     opt_pol.step()
     opt_enc.step()
 
-    return {'wm': lw.item(), 'value': lv.item(), 'policy': lp.item()}
+    return {'wm': lw.item(), 'value': lv.item(), 'policy': lp.item(), 'entropy': entropy}
 
 
 # ── Module factory ────────────────────────────────────────────────────────────
@@ -586,7 +590,8 @@ def main():
                 f'ep {ep:4d} | R={ep_reward:+7.2f}  avg={avg:+7.2f} | '
                 f'wm={losses["wm"]:.4f}  '
                 f'v={losses["value"]:.4f}  '
-                f'π={losses["policy"]:.4f}  '
+                f'π={losses["policy"]:+.6f}  '
+                f'H={losses["entropy"]:.3f}  '
                 f'({elapsed:.2f}s)'
             )
         ep += 1

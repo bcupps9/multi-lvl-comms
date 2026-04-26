@@ -44,6 +44,7 @@ struct BattleshipConfig {
     int   max_steps   = 60;   // episode cap
     float reward_hit_boss   =  1.f;
     float reward_hit_self   = -1.f;
+    float reward_survive    =  0.05f;  // per agent cell alive per step (survival signal)
 };
 
 // ── Grid cell ──────────────────────────────────────────────────────────────────

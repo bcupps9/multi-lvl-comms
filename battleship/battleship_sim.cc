@@ -373,7 +373,9 @@ int main(int argc, char* argv[]) {
         else if (arg == "--boss"     && i+1<argc) bcfg.n_boss      = std::stoi(argv[++i]);
         else if (arg == "--sight"    && i+1<argc) bcfg.sight_range = std::stoi(argv[++i]);
         else if (arg == "--fire"     && i+1<argc) bcfg.fire_range  = std::stoi(argv[++i]);
-        else if (arg == "--steps"    && i+1<argc) bcfg.max_steps   = std::stoi(argv[++i]);
+        else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
+        else if (arg == "--survive"  && i+1<argc) bcfg.reward_survive = std::stof(argv[++i]);
+        else if (arg == "--no-survive")           bcfg.reward_survive = 0.f;
         else if (arg[0] != '-')                   weights_dir = arg;
         else {
             std::print(stderr,

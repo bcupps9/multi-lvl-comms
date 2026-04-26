@@ -237,6 +237,12 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         }
     }
 
+    // Survival bonus: reward agents for keeping cells alive each step.
+    if (cfg_.reward_survive != 0.f) {
+        for (const auto& a : agents_)
+            reward += cfg_.reward_survive * a.hp();
+    }
+
     step_reward_ = reward;
     ep_reward_  += reward;
     ++step_;
