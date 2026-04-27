@@ -33,6 +33,7 @@
 #include "cotamer/cotamer.hh"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -83,6 +84,12 @@ struct BsEpStats {
     bool  boss_won           = false;
     float mean_intention_spread = 0.f;
     std::vector<int> first_mover_counts;
+    int   agent_shots        = 0;
+    int   fire_oob           = 0;
+    float mean_fire_dist     = 0.f;
+    std::vector<int> fire_dist_counts;
+    std::array<int, 5> move_counts{};
+    std::vector<int> fire_offset_counts;
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -93,6 +100,25 @@ static std::string jn(double v, int d = 3) {
     return o.str();
 }
 static std::string jb(bool v) { return v ? "true" : "false"; }
+
+static void write_int_array(std::ofstream& f, const std::vector<int>& xs) {
+    f << "[";
+    for (int i = 0; i < (int)xs.size(); ++i) {
+        if (i) f << ", ";
+        f << xs[i];
+    }
+    f << "]";
+}
+
+template <size_t N>
+static void write_int_array(std::ofstream& f, const std::array<int, N>& xs) {
+    f << "[";
+    for (size_t i = 0; i < N; ++i) {
+        if (i) f << ", ";
+        f << xs[i];
+    }
+    f << "]";
+}
 
 static std::string now_ts() {
     auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -210,6 +236,12 @@ static CotamerResult run_cotamer_episode(BattleshipEnv& env,
     s.agent_hits = env_s.agent_hits;
     s.agents_won = env_s.agents_won;
     s.boss_won   = env_s.boss_won;
+    s.agent_shots = env_s.agent_shots;
+    s.fire_oob = env_s.fire_oob;
+    s.mean_fire_dist = env_s.mean_fire_dist;
+    s.fire_dist_counts = env_s.fire_dist_counts;
+    s.move_counts = env_s.move_counts;
+    s.fire_offset_counts = env_s.fire_offset_counts;
     s.first_mover_counts.assign(N, 0);
 
     for (auto& tr : traj) {
@@ -306,6 +338,12 @@ static BsEpStats run_sync_episode(BattleshipEnv& env, NeuralModels& models,
     s.agent_hits = env_s.agent_hits;
     s.agents_won = env_s.agents_won;
     s.boss_won   = env_s.boss_won;
+    s.agent_shots = env_s.agent_shots;
+    s.fire_oob = env_s.fire_oob;
+    s.mean_fire_dist = env_s.mean_fire_dist;
+    s.fire_dist_counts = env_s.fire_dist_counts;
+    s.move_counts = env_s.move_counts;
+    s.fire_offset_counts = env_s.fire_offset_counts;
     s.first_mover_counts.assign(N, 0);
     for (auto& tr : traj)
         if (tr.agent_id == 0) s.total_reward += tr.reward;
@@ -345,6 +383,16 @@ static void write_ep_log(std::ofstream& f, int ep, const BsEpStats& s) {
       << "\"agent_hits\": " << s.agent_hits << ", "
       << "\"agents_won\": " << jb(s.agents_won) << ", "
       << "\"boss_won\": " << jb(s.boss_won) << ", "
+      << "\"agent_shots\": " << s.agent_shots << ", "
+      << "\"fire_oob\": " << s.fire_oob << ", "
+      << "\"mean_fire_dist\": " << jn(s.mean_fire_dist) << ", "
+      << "\"fire_dist_counts\": ";
+    write_int_array(f, s.fire_dist_counts);
+    f << ", \"move_counts\": ";
+    write_int_array(f, s.move_counts);
+    f << ", \"fire_offset_counts\": ";
+    write_int_array(f, s.fire_offset_counts);
+    f << ", "
       << "\"intention_spread\": " << jn(s.mean_intention_spread) << ", "
       << "\"first_mover\": [";
     for (int i = 0; i < (int)s.first_mover_counts.size(); ++i) {
@@ -426,9 +474,10 @@ int main(int argc, char* argv[]) {
     fs::path traj_bin   = weights_dir.empty() ? fs::path{} : fs::path(weights_dir)/"traj.bin";
     fs::path traj_ready = weights_dir.empty() ? fs::path{} : fs::path(weights_dir)/"traj.ready";
     fs::path wts_ready  = weights_dir.empty() ? fs::path{} : fs::path(weights_dir)/"weights.ready";
+    fs::path traj_done  = weights_dir.empty() ? fs::path{} : fs::path(weights_dir)/"traj.done";
 
     if (do_train) {
-        for (auto* p : {&traj_ready, &wts_ready}) {
+        for (auto* p : {&traj_ready, &wts_ready, &traj_done}) {
             std::error_code ec; fs::remove(*p, ec);
         }
     }
@@ -494,5 +543,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::print("\navg reward: {:.3f}\n", reward_sum / n_ep);
+    if (do_train)
+        touch(traj_done);
     return 0;
 }

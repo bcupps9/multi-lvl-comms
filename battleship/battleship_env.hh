@@ -116,6 +116,12 @@ struct BattleshipEnv : Environment {
         bool  agents_won;   // all boss ships sunk
         bool  boss_won;     // all agent ships sunk
         float total_reward;
+        int   agent_shots;
+        int   fire_oob;
+        float mean_fire_dist;
+        std::vector<int> fire_dist_counts;   // 0..fire_range, then >fire_range
+        std::array<int, 5> move_counts;      // stay, N, S, E, W
+        std::vector<int> fire_offset_counts; // row-major over [-fire_range, fire_range]^2
     };
     EpisodeStats episode_stats() const;
 
@@ -132,6 +138,13 @@ private:
     float ep_reward_   = 0.f;
     int   ep_boss_hits_  = 0;
     int   ep_agent_hits_ = 0;
+    int   ep_agent_shots_ = 0;
+    int   ep_fire_oob_ = 0;
+    int   ep_fire_dist_samples_ = 0;
+    float ep_fire_dist_sum_ = 0.f;
+    std::vector<int> ep_fire_dist_counts_;
+    std::array<int, 5> ep_move_counts_{};
+    std::vector<int> ep_fire_offset_counts_;
 
     // Per-step output (set by step_env)
     std::vector<std::vector<float>> next_obs_;

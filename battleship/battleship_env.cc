@@ -31,6 +31,14 @@ std::vector<std::vector<float>> BattleshipEnv::reset() {
     ep_reward_     = 0.f;
     ep_boss_hits_  = 0;
     ep_agent_hits_ = 0;
+    ep_agent_shots_ = 0;
+    ep_fire_oob_ = 0;
+    ep_fire_dist_samples_ = 0;
+    ep_fire_dist_sum_ = 0.f;
+    ep_fire_dist_counts_.assign(cfg_.fire_range + 2, 0);
+    ep_move_counts_.fill(0);
+    int fire_span = 2 * cfg_.fire_range + 1;
+    ep_fire_offset_counts_.assign(fire_span * fire_span, 0);
     submitted_     = 0;
     results_ready_ = false;
 
@@ -246,11 +254,30 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         if (agents_[i].sunk()) continue;
         const auto& a = actions[i];
         int dir = decode_move(a[0]);
+        ++ep_move_counts_[dir];
         move_ship(agents_[i], DR[dir], DC[dir]);
 
         auto [fdr, fdc] = decode_fire(a[1], a[2], cfg_.fire_range);
+        int fire_span = 2 * cfg_.fire_range + 1;
+        int offset_idx = (fdr + cfg_.fire_range) * fire_span + (fdc + cfg_.fire_range);
+        if (offset_idx >= 0 && offset_idx < static_cast<int>(ep_fire_offset_counts_.size()))
+            ++ep_fire_offset_counts_[offset_idx];
+
         int tr = agents_[i].cr + fdr;
         int tc = agents_[i].cc + fdc;
+        ++ep_agent_shots_;
+        if (tr < 0 || tr >= cfg_.M || tc < 0 || tc >= cfg_.M)
+            ++ep_fire_oob_;
+
+        int dist = nearest_live_boss_dist(tr, tc);
+        if (dist != INT_MAX) {
+            ep_fire_dist_sum_ += static_cast<float>(dist);
+            ++ep_fire_dist_samples_;
+            int bucket = std::min(dist, cfg_.fire_range + 1);
+            if (bucket >= 0 && bucket < static_cast<int>(ep_fire_dist_counts_.size()))
+                ++ep_fire_dist_counts_[bucket];
+        }
+
         if (fire_at(false, tr, tc)) {
             reward += cfg_.reward_hit_boss;
             ++ep_boss_hits_;
@@ -390,7 +417,23 @@ BattleshipEnv::EpisodeStats BattleshipEnv::episode_stats() const {
                                   [](const Ship& s){ return s.sunk(); });
     bool boss_won   = std::all_of(agents_.begin(), agents_.end(),
                                   [](const Ship& s){ return s.sunk(); });
-    return {step_, ep_boss_hits_, ep_agent_hits_, agents_won, boss_won, ep_reward_};
+    float mean_fire_dist = ep_fire_dist_samples_ > 0
+        ? ep_fire_dist_sum_ / static_cast<float>(ep_fire_dist_samples_)
+        : 0.f;
+    return {
+        step_,
+        ep_boss_hits_,
+        ep_agent_hits_,
+        agents_won,
+        boss_won,
+        ep_reward_,
+        ep_agent_shots_,
+        ep_fire_oob_,
+        mean_fire_dist,
+        ep_fire_dist_counts_,
+        ep_move_counts_,
+        ep_fire_offset_counts_,
+    };
 }
 
 } // namespace seqcomm

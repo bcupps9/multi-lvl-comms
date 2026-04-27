@@ -60,6 +60,7 @@ ENTROPY_COEF = 0.01   # encourages exploration; prevents policy collapse
 LR_ENC      = 1e-4
 LR_WORLD    = 3e-4
 LR_POL      = 1e-3    # higher than WM — policy needs stronger signal
+GRAD_CLIP   = 1.0
 
 LOG_EVERY    = 20
 POLL_INTERVAL = 0.05  # seconds
@@ -368,10 +369,10 @@ def compute_gae(rewards: list, values: list,
 # ── Loss functions ────────────────────────────────────────────────────────────
 
 def loss_value(encoder, attn_a, critic,
-               obs_pv, up_pv, returns_pv):
+               obs_self, up_pv, returns_pv):
     """Eq 2: MSE value loss."""
-    h = encoder(obs_pv[:, 0])              # (B, embed)
-    ctx = attn_a(h, up_pv)                # (B, embed)
+    h = encoder(obs_self)                  # (B, embed)
+    ctx = attn_a(h, up_pv)                 # (B, embed)
     v = critic(ctx)                        # (B,)
     diff = returns_pv - v
     return (diff * diff).mean()
@@ -408,10 +409,12 @@ def loss_world_model(encoder, attn_w, world_model,
     return (diff * diff).sum(dim=-1).mean()
 
 
-# ── Single-episode update ─────────────────────────────────────────────────────
+# ── Update ────────────────────────────────────────────────────────────────────
 
-def update_episode(transitions, n_agents, nets,
-                   opt_enc, opt_world, opt_pol) -> dict:
+def update_batch(episodes, n_agents, nets,
+                 opt_enc, opt_world, opt_pol,
+                 entropy_coef: float = ENTROPY_COEF,
+                 grad_clip: float = GRAD_CLIP) -> dict:
     encoder     = nets['encoder']
     attn_a      = nets['attn_a']
     attn_w      = nets['attn_w']
@@ -419,43 +422,50 @@ def update_episode(transitions, n_agents, nets,
     policy      = nets['policy']
     critic      = nets['critic']
 
-    # ── GAE per agent ──────────────────────────────────────────────────────────
-    adv_by = {}
-    ret_by = {}
-    for i in range(n_agents):
-        agent_trs = [tr for tr in transitions if tr['agent_id'] == i]
-        rews  = [tr['reward'] for tr in agent_trs]
-        vals  = [tr['value']  for tr in agent_trs]
-        adv, ret = compute_gae(rews, vals)
-        adv_by[i] = adv
-        ret_by[i] = ret
+    # World-model batch: one record per timestep, across all agents.
+    obs_wm_list, actions_wm_list, next_obs_wm_list, rewards_wm_list = [], [], [], []
 
-    T = len(transitions) // n_agents
-
-    # ── World-model batch (one record per timestep, across all agents) ─────────
-    trs0 = [tr for tr in transitions if tr['agent_id'] == 0]
-    obs_wm      = torch.stack([tr['obs_all']      for tr in trs0])   # (T, N, obs_dim)
-    actions_wm  = torch.stack([tr['actions_all']  for tr in trs0])   # (T, N, act_dim)
-    next_obs_wm = torch.stack([tr['next_obs_all'] for tr in trs0])   # (T, N, obs_dim)
-    rewards_wm  = torch.tensor([tr['reward'] for tr in trs0], dtype=torch.float32)
-
-    # ── Policy/value batch (one record per agent per timestep) ─────────────────
-    obs_pv_list, up_list, obs_self_list = [], [], []
+    # Policy/value batch: one record per agent per timestep.
+    up_list, obs_self_list = [], []
     act_list, ret_list, adv_list, lp_list = [], [], [], []
 
-    for t in range(T):
+    for transitions in episodes:
+        # GAE must reset at episode boundaries; batching should reduce variance
+        # without pretending the last state of one episode leads into the next.
+        adv_by = {}
+        ret_by = {}
         for i in range(n_agents):
-            tr = transitions[t * n_agents + i]
-            obs_pv_list.append(tr['obs_all'])          # (N, obs_dim) — self is [i]
-            up_list.append(tr['up_pad_i'])              # (N, act_dim) — upper actions
-            obs_self_list.append(tr['obs_all'][i])      # (obs_dim,)
-            act_list.append(tr['action_i'])
-            ret_list.append(ret_by[i][t])
-            adv_list.append(adv_by[i][t])
-            lp_list.append(tr['log_prob'])
+            agent_trs = [tr for tr in transitions if tr['agent_id'] == i]
+            rews  = [tr['reward'] for tr in agent_trs]
+            vals  = [tr['value']  for tr in agent_trs]
+            adv, ret = compute_gae(rews, vals)
+            adv_by[i] = adv
+            ret_by[i] = ret
 
-    # Stack; obs_pv has self at index i, but for value/policy we only use self
-    obs_pv      = torch.stack(obs_pv_list)             # (B, N, obs_dim)
+        T = len(transitions) // n_agents
+
+        for tr in transitions:
+            if tr['agent_id'] == 0:
+                obs_wm_list.append(tr['obs_all'])
+                actions_wm_list.append(tr['actions_all'])
+                next_obs_wm_list.append(tr['next_obs_all'])
+                rewards_wm_list.append(tr['reward'])
+
+        for t in range(T):
+            for i in range(n_agents):
+                tr = transitions[t * n_agents + i]
+                up_list.append(tr['up_pad_i'])          # (N, act_dim) — upper actions
+                obs_self_list.append(tr['obs_all'][i])  # (obs_dim,)
+                act_list.append(tr['action_i'])
+                ret_list.append(ret_by[i][t])
+                adv_list.append(adv_by[i][t])
+                lp_list.append(tr['log_prob'])
+
+    obs_wm      = torch.stack(obs_wm_list)              # (T_total, N, obs_dim)
+    actions_wm  = torch.stack(actions_wm_list)          # (T_total, N, act_dim)
+    next_obs_wm = torch.stack(next_obs_wm_list)         # (T_total, N, obs_dim)
+    rewards_wm  = torch.tensor(rewards_wm_list, dtype=torch.float32)
+
     up_pv       = torch.stack(up_list)                 # (B, N, act_dim)
     obs_self_pv = torch.stack(obs_self_list)           # (B, obs_dim)
     actions_pv  = torch.stack(act_list)                # (B, act_dim)
@@ -471,19 +481,41 @@ def update_episode(transitions, n_agents, nets,
     lw = loss_world_model(encoder, attn_w, world_model,
                           obs_wm, actions_wm, next_obs_wm, rewards_wm)
     lw.backward()
+    if grad_clip > 0:
+        nn.utils.clip_grad_norm_(
+            list(encoder.parameters()) +
+            list(attn_w.parameters()) +
+            list(world_model.parameters()),
+            grad_clip,
+        )
     opt_world.step()
 
     # Encoder grads from world-model survive here; policy adds its own below.
     opt_pol.zero_grad()
-    lv = loss_value(encoder, attn_a, critic, obs_pv, up_pv, returns_pv)
+    lv = loss_value(encoder, attn_a, critic, obs_self_pv, up_pv, returns_pv)
     lp, entropy = loss_policy(encoder, attn_a, policy,
                               obs_self_pv, up_pv, actions_pv,
-                              adv_pv, lp_old_pv)
+                              adv_pv, lp_old_pv,
+                              entropy_coef=entropy_coef)
     (lv + lp).backward()
+    if grad_clip > 0:
+        nn.utils.clip_grad_norm_(
+            list(encoder.parameters()) +
+            list(attn_a.parameters()) +
+            list(policy.parameters()) +
+            list(critic.parameters()),
+            grad_clip,
+        )
     opt_pol.step()
     opt_enc.step()
 
     return {'wm': lw.item(), 'value': lv.item(), 'policy': lp.item(), 'entropy': entropy}
+
+
+def update_episode(transitions, n_agents, nets,
+                   opt_enc, opt_world, opt_pol) -> dict:
+    return update_batch([transitions], n_agents, nets,
+                        opt_enc, opt_world, opt_pol)
 
 
 # ── Module factory ────────────────────────────────────────────────────────────
@@ -499,18 +531,21 @@ def make_nets(obs_dim: int, n_agents: int) -> dict:
     }
 
 
-def make_optimizers(nets: dict):
-    opt_enc = optim.Adam(nets['encoder'].parameters(), lr=LR_ENC)
+def make_optimizers(nets: dict,
+                    lr_enc: float = LR_ENC,
+                    lr_world: float = LR_WORLD,
+                    lr_policy: float = LR_POL):
+    opt_enc = optim.Adam(nets['encoder'].parameters(), lr=lr_enc)
     opt_world = optim.Adam(
         list(nets['attn_w'].parameters()) +
         list(nets['world_model'].parameters()),
-        lr=LR_WORLD,
+        lr=lr_world,
     )
     opt_pol = optim.Adam(
         list(nets['attn_a'].parameters()) +
         list(nets['policy'].parameters()) +
         list(nets['critic'].parameters()),
-        lr=LR_POL,
+        lr=lr_policy,
     )
     return opt_enc, opt_world, opt_pol
 
@@ -549,6 +584,50 @@ def load_from_scripts(nets: dict, weights_dir: str) -> None:
             print(f'  warn: could not load policy.pt: {e}')
 
 
+def write_trainer_meta(f, args, obs_dim: int, n_agents: int) -> None:
+    if f is None:
+        return
+    f.write(json.dumps({
+        '_meta': {
+            'kind': 'battleship_trainer',
+            'obs_dim': obs_dim,
+            'n_agents': n_agents,
+            'embed_dim': EMBED_DIM,
+            'action_dim': ACTION_DIM,
+            'update_every': max(1, args.update_every),
+            'entropy_coef': args.entropy_coef,
+            'grad_clip': args.grad_clip,
+            'lr_enc': args.lr_enc,
+            'lr_world': args.lr_world,
+            'lr_policy': args.lr_policy,
+        }
+    }) + '\n')
+    f.flush()
+
+
+def write_trainer_update(f, update_idx: int, ep: int, batch_size: int,
+                         losses: dict, policy: Policy, elapsed: float) -> None:
+    if f is None:
+        return
+    log_std = policy.log_std.detach().cpu()
+    row = {
+        'update': update_idx,
+        'last_episode': ep,
+        'batch_size': batch_size,
+        'world_model_loss': losses['wm'],
+        'value_loss': losses['value'],
+        'policy_loss': losses['policy'],
+        'entropy': losses['entropy'],
+        'policy_log_std_mean': float(log_std.mean()),
+        'policy_log_std_min': float(log_std.min()),
+        'policy_log_std_max': float(log_std.max()),
+        'policy_std_mean': float(log_std.exp().mean()),
+        'elapsed_sec': elapsed,
+    }
+    f.write(json.dumps(row) + '\n')
+    f.flush()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -561,11 +640,21 @@ def main():
     parser.add_argument('--obs-dim', type=int, default=OBS_DIM,
                         help=f'Observation dim (default {OBS_DIM} for sight_range=4)')
     parser.add_argument('--n-agents', type=int, default=N_AGENTS)
+    parser.add_argument('--update-every', type=int, default=1,
+                        help='Accumulate this many complete episodes per optimizer update')
+    parser.add_argument('--entropy-coef', type=float, default=ENTROPY_COEF)
+    parser.add_argument('--grad-clip', type=float, default=GRAD_CLIP)
+    parser.add_argument('--lr-enc', type=float, default=LR_ENC)
+    parser.add_argument('--lr-world', type=float, default=LR_WORLD)
+    parser.add_argument('--lr-policy', type=float, default=LR_POL)
+    parser.add_argument('--trainer-log',
+                        help='Optional JSONL file for Python update diagnostics')
     args = parser.parse_args()
 
     weights_dir = args.weights_dir
     obs_dim     = args.obs_dim
     n_agents    = args.n_agents
+    update_every = max(1, args.update_every)
 
     nets = make_nets(obs_dim, n_agents)
 
@@ -578,28 +667,62 @@ def main():
 
     # Warm-start if weights already exist
     load_from_scripts(nets, weights_dir)
-    opt_enc, opt_world, opt_pol = make_optimizers(nets)
+    opt_enc, opt_world, opt_pol = make_optimizers(
+        nets,
+        lr_enc=args.lr_enc,
+        lr_world=args.lr_world,
+        lr_policy=args.lr_policy,
+    )
 
     traj_bin   = os.path.join(weights_dir, 'traj.bin')
     traj_ready = os.path.join(weights_dir, 'traj.ready')
     traj_done  = os.path.join(weights_dir, 'traj.done')
     wts_ready  = os.path.join(weights_dir, 'weights.ready')
 
+    trainer_log = None
+    if args.trainer_log:
+        os.makedirs(os.path.dirname(args.trainer_log) or '.', exist_ok=True)
+        trainer_log = open(args.trainer_log, 'w')
+        write_trainer_meta(trainer_log, args, obs_dim, n_agents)
+
     print(f'train_battleship: watching {weights_dir}/')
     print(f'  obs_dim={obs_dim}  embed_dim={EMBED_DIM}  '
           f'action_dim={ACTION_DIM}  n_agents={n_agents}')
+    print(f'  update_every={update_every}  entropy_coef={args.entropy_coef}  '
+          f'grad_clip={args.grad_clip}  lr_policy={args.lr_policy}')
     print('Waiting for C++ sim…  (run: battleship-sim weights_bs/ --mode seqcomm)\n')
 
     # Boss policy is pure C++ heuristic — no neural training needed.
     # Agent encoder, attention, policy, critic, and world model are updated here.
 
     ep = 0
+    update_idx = 0
     reward_hist: list[float] = []
+    batch: list[list[dict]] = []
+    last_losses = {'wm': float('nan'), 'value': float('nan'),
+                   'policy': float('nan'), 'entropy': float('nan')}
 
     while True:
         while not os.path.exists(traj_ready):
             if os.path.exists(traj_done):
+                if batch:
+                    t_final = time.time()
+                    batch_size = len(batch)
+                    losses = update_batch(batch, n_agents, nets,
+                                          opt_enc, opt_world, opt_pol,
+                                          entropy_coef=args.entropy_coef,
+                                          grad_clip=args.grad_clip)
+                    save_weights_bin(nets, weights_dir)
+                    write_trainer_update(
+                        trainer_log, update_idx, ep - 1, batch_size,
+                        losses, nets['policy'], time.time() - t_final)
+                    update_idx += 1
+                    print(f'\nFinal partial update on {len(batch)} buffered episode(s): '
+                          f'wm={losses["wm"]:.4f} v={losses["value"]:.4f} '
+                          f'π={losses["policy"]:+.6f}')
                 print(f'\nC++ sim finished after {ep} episodes.')
+                if trainer_log is not None:
+                    trainer_log.close()
                 try:
                     os.remove(traj_done)
                 except OSError:
@@ -620,26 +743,41 @@ def main():
             open(wts_ready, 'w').close()
             continue
 
-        losses = update_episode(transitions, n_agents, nets,
-                                opt_enc, opt_world, opt_pol)
+        batch.append(transitions)
+        did_update = len(batch) >= update_every
+        if did_update:
+            batch_size = len(batch)
+            last_losses = update_batch(batch, n_agents, nets,
+                                       opt_enc, opt_world, opt_pol,
+                                       entropy_coef=args.entropy_coef,
+                                       grad_clip=args.grad_clip)
+            batch.clear()
 
         ep_reward = sum(tr['reward'] for tr in transitions if tr['agent_id'] == 0)
         reward_hist.append(ep_reward)
 
-        # Write binary blob (fast, no TorchScript tracing overhead per episode)
-        save_weights_bin(nets, weights_dir)
+        # Write a fresh blob only when the optimizer actually changed weights.
+        # On non-update episodes C++ reloads the previous blob and continues with
+        # the same policy, giving us lower-variance multi-episode updates.
+        elapsed = time.time() - t0
+        if did_update:
+            save_weights_bin(nets, weights_dir)
+            write_trainer_update(
+                trainer_log, update_idx, ep, batch_size,
+                last_losses, nets['policy'], elapsed)
+            update_idx += 1
         open(wts_ready, 'w').close()
 
-        elapsed = time.time() - t0
         if ep % LOG_EVERY == 0:
             recent = reward_hist[-LOG_EVERY:]
             avg = sum(recent) / len(recent)
             print(
                 f'ep {ep:4d} | R={ep_reward:+7.2f}  avg={avg:+7.2f} | '
-                f'wm={losses["wm"]:.4f}  '
-                f'v={losses["value"]:.4f}  '
-                f'π={losses["policy"]:+.6f}  '
-                f'H={losses["entropy"]:.3f}  '
+                f'wm={last_losses["wm"]:.4f}  '
+                f'v={last_losses["value"]:.4f}  '
+                f'π={last_losses["policy"]:+.6f}  '
+                f'H={last_losses["entropy"]:.3f}  '
+                f'batch={len(batch)}/{update_every}  '
                 f'({elapsed:.2f}s)'
             )
         ep += 1
