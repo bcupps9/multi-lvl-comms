@@ -1,0 +1,17 @@
+Training [mappo] on 'coverage' env | obs_dim=10  embed_dim=64  action_dim=1  agents=4  episodes=150  seed=1  compute_intention=False  share_actions=False  ordering=fixed  H=2  F=2
+Logging to logs/island/coverage_mappo_H2_F2_seed1.jsonl
+ep    0 | R=-400.00 | collisions=0  done=t=200  wm=11.0761  v=995.1702  π=0.0000
+ep   10 | R=-400.00 | collisions=0  done=t=200  wm=10.1110  v=994.1453  π=-0.0000
+ep   20 | R=-394.00 | collisions=0  done=t=200  wm=7.6113  v=965.8392  π=0.0000
+ep   30 | R=-400.00 | collisions=0  done=t=200  wm=7.8501  v=988.2566  π=0.0000
+ep   40 | R=-400.00 | collisions=0  done=t=200  wm=5.5860  v=974.8261  π=0.0000
+ep   50 | R=-400.00 | collisions=0  done=t=200  wm=4.8839  v=940.1914  π=0.0000
+ep   60 | R=-400.00 | collisions=0  done=t=200  wm=2.4284  v=839.0646  π=-0.0000
+ep   70 | R=-400.00 | collisions=0  done=t=200  wm=1.9120  v=659.4064  π=-0.0000
+ep   80 | R=-364.00 | collisions=0  done=t=200  wm=4.4870  v=523.4559  π=-0.0000
+ep   90 | R=-400.00 | collisions=0  done=t=200  wm=4.2257  v=1108.6970  π=-0.0000
+ep  100 | R=-400.00 | collisions=0  done=t=200  wm=3.0139  v=825.3344  π=0.0000
+ep  110 | R=-398.50 | collisions=0  done=t=200  wm=9.4822  v=532.8849  π=0.0003
+ep  120 | R=-400.00 | collisions=0  done=t=200  wm=6.5517  v=858.5295  π=0.0022
+ep  130 | R=-400.00 | collisions=0  done=t=200  wm=5.4684  v=665.5999  π=0.0006
+ep  140 | R=-397.00 | collisions=0  done=t=200  wm=7.9113  v=615.2456  π=-0.0002

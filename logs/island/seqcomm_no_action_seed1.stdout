@@ -1,0 +1,12 @@
+Training [seqcomm_no_action] on 'coverage' env | obs_dim=10  embed_dim=64  action_dim=1  agents=4  episodes=100  seed=1  compute_intention=True  share_actions=False  ordering=intention  H=1  F=1
+Logging to logs/island/coverage_seqcomm_no_action_H1_F1_seed1.jsonl
+ep    0 | R=-100.00 | collisions=0  done=t=50  wm=8.7253  v=622.2835  π=0.0000
+ep   10 | R= -98.50 | collisions=0  done=t=50  wm=7.9489  v=598.3244  π=-0.0000
+ep   20 | R=-100.00 | collisions=0  done=t=50  wm=9.5665  v=618.5265  π=0.0000
+ep   30 | R= -98.50 | collisions=0  done=t=50  wm=8.6501  v=609.2290  π=-0.0000
+ep   40 | R= -92.50 | collisions=0  done=t=50  wm=5.4807  v=495.7320  π=-0.0001
+ep   50 | R=-100.00 | collisions=0  done=t=50  wm=6.7829  v=546.0972  π=0.0000
+ep   60 | R=-100.00 | collisions=0  done=t=50  wm=5.9491  v=431.5972  π=0.0000
+ep   70 | R=-100.00 | collisions=0  done=t=50  wm=5.0914  v=335.2246  π=0.0000
+ep   80 | R= -92.50 | collisions=0  done=t=50  wm=4.0965  v=531.6760  π=0.0001
+ep   90 | R=-100.00 | collisions=0  done=t=50  wm=2.6000  v=339.3461  π=0.0000

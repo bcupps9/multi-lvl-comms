@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_DIR="$REPO_DIR/logs/baseline"
+LOG_DIR="${2:-$REPO_DIR/logs/baseline}"
 EPISODES="${EPISODES:-2000}"
 MODES=(seqcomm mappo seqcomm_random seqcomm_no_action seqcomm_fixed)
 SEEDS=(0 1 2)

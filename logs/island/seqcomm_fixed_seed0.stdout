@@ -1,0 +1,17 @@
+Training [seqcomm_fixed] on 'coverage' env | obs_dim=10  embed_dim=64  action_dim=1  agents=4  episodes=150  seed=0  compute_intention=False  share_actions=True  ordering=fixed  H=2  F=2
+Logging to logs/island/coverage_seqcomm_fixed_H2_F2_seed0.jsonl
+ep    0 | R=-400.00 | collisions=0  done=t=200  wm=11.2822  v=994.0203  π=0.0000
+ep   10 | R=-400.00 | collisions=0  done=t=200  wm=10.8534  v=993.0986  π=0.0000
+ep   20 | R=-391.00 | collisions=0  done=t=200  wm=7.8082  v=954.8409  π=0.0001
+ep   30 | R=-400.00 | collisions=0  done=t=200  wm=7.2055  v=990.0731  π=0.0001
+ep   40 | R=-398.50 | collisions=0  done=t=200  wm=4.8699  v=975.7972  π=0.0001
+ep   50 | R=-391.00 | collisions=0  done=t=200  wm=3.8019  v=918.8189  π=-0.0003
+ep   60 | R=-400.00 | collisions=0  done=t=200  wm=10.6143  v=914.9545  π=0.0020
+ep   70 | R=-400.00 | collisions=0  done=t=200  wm=8.6733  v=723.3748  π=-0.0001
+ep   80 | R=-400.00 | collisions=0  done=t=200  wm=5.3430  v=585.6470  π=-0.0015
+ep   90 | R=-400.00 | collisions=0  done=t=200  wm=3.2134  v=1209.5623  π=0.0000
+ep  100 | R=-400.00 | collisions=0  done=t=200  wm=1.3750  v=635.8792  π=-0.0024
+ep  110 | R=-400.00 | collisions=0  done=t=200  wm=2.7445  v=812.4938  π=-0.0014
+ep  120 | R=-400.00 | collisions=0  done=t=200  wm=0.5799  v=828.5831  π=-0.0006
+ep  130 | R=-400.00 | collisions=0  done=t=200  wm=2.4813  v=748.6275  π=0.0000
+ep  140 | R=-400.00 | collisions=0  done=t=200  wm=2.8384  v=803.7453  π=-0.0015
