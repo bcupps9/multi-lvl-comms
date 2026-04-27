@@ -198,7 +198,7 @@ std::pair<int, int> BattleshipEnv::decode_fire(float dr_raw, float dc_raw, int r
 
 std::array<int, 3> BattleshipEnv::boss_policy(int boss_id) const {
     const Ship& b = bosses_[boss_id];
-    int R = cfg_.fire_range;
+    int R = cfg_.boss_fire_range;
 
     // Nearest in-range agent cell → fire target.
     int best_dist = INT_MAX, fdr = 0, fdc = 0;

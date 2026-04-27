@@ -29,6 +29,7 @@ AGENTS="${AGENTS:-2}"
 BOSS="${BOSS:-1}"
 SIGHT="${SIGHT:-4}"
 FIRE="${FIRE:-2}"
+BOSS_FIRE="${BOSS_FIRE:-$FIRE}"
 STEPS="${STEPS:-60}"
 SURVIVE="${SURVIVE:-0.005}"
 WIN_REWARD="${WIN_REWARD:-10}"
@@ -155,6 +156,7 @@ run_one() {
             --boss "$BOSS" \
             --sight "$SIGHT" \
             --fire "$FIRE" \
+            --boss-fire "$BOSS_FIRE" \
             --steps "$STEPS" \
             --survive "$SURVIVE" \
             --near-boss "$NEAR_BOSS" \

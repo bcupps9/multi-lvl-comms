@@ -425,7 +425,8 @@ int main(int argc, char* argv[]) {
         else if (arg == "--agents"   && i+1<argc) bcfg.n_agents    = std::stoi(argv[++i]);
         else if (arg == "--boss"     && i+1<argc) bcfg.n_boss      = std::stoi(argv[++i]);
         else if (arg == "--sight"    && i+1<argc) bcfg.sight_range = std::stoi(argv[++i]);
-        else if (arg == "--fire"     && i+1<argc) bcfg.fire_range  = std::stoi(argv[++i]);
+        else if (arg == "--fire"     && i+1<argc) { bcfg.fire_range = std::stoi(argv[++i]); bcfg.boss_fire_range = bcfg.fire_range; }
+        else if (arg == "--boss-fire" && i+1<argc) bcfg.boss_fire_range = std::stoi(argv[++i]);
         else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
         else if (arg == "--survive"  && i+1<argc) bcfg.reward_survive = std::stof(argv[++i]);
         else if (arg == "--near-boss" && i+1<argc) bcfg.reward_near_boss = std::stof(argv[++i]);
@@ -444,7 +445,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (mode == Mode::MAPPO) do_train = false;  // mappo uses its own Python side
+    // MAPPO trains via the same traj.bin IPC as seqcomm — just no cascade in actions.
     if (do_train && weights_dir.empty()) {
         std::print(stderr, "error: weights_dir required for training\n");
         return 1;
@@ -502,13 +503,28 @@ int main(int argc, char* argv[]) {
                log_path.string());
 
     float reward_sum = 0.f;
-    std::vector<transition> sync_traj;
+    std::vector<transition> mappo_batch;   // accumulates across episodes for MAPPO
+    constexpr int MAPPO_UPDATE_EVERY = 8;
 
     for (int ep = 0; ep < n_ep; ++ep) {
         BsEpStats stats;
 
         if (mode == Mode::MAPPO) {
-            stats = run_sync_episode(env, *models, sync_traj);
+            std::vector<transition> ep_traj;
+            stats = run_sync_episode(env, *models, ep_traj);
+            mappo_batch.insert(mappo_batch.end(), ep_traj.begin(), ep_traj.end());
+
+            if (do_train && (ep + 1) % MAPPO_UPDATE_EVERY == 0 && !mappo_batch.empty()) {
+                write_trajectory(traj_bin.string(), mappo_batch,
+                                 bcfg.n_agents, env.obs_dim(), env.action_dim());
+                touch(traj_ready);
+                std::print("  ep {:4d}  waiting for Python…\n", ep);
+                wait_for(wts_ready);
+                fs::remove(traj_ready);
+                fs::remove(wts_ready);
+                models_ptr->update_from_blob(weights_dir);
+                mappo_batch.clear();
+            }
         } else {
             auto res = run_cotamer_episode(env, *models, rng, mode);
             stats    = res.stats;

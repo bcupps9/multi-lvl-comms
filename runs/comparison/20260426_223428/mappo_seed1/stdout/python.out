@@ -1,0 +1,16 @@
+train_battleship: watching runs/comparison/20260426_223428/mappo_seed1/weights/
+  obs_dim=245  embed_dim=64  action_dim=3  n_agents=2
+  update_every=8  entropy_coef=0.003  grad_clip=1.0  lr_policy=0.0003
+Waiting for C++ sim…  (run: battleship-sim weights_bs/ --mode seqcomm)
+
+ep    0 | R= -11.03  avg= -11.03 | wm=nan  v=nan  π=+nan  H=nan  batch=1/8  (0.00s)
+ep   20 | R=  -5.37  avg=  -6.31 | wm=11.2558  v=5.9275  π=-0.012771  H=4.257  batch=5/8  (0.00s)
+ep   40 | R=  -6.27  avg=  -6.44 | wm=10.7070  v=8.7205  π=-0.012772  H=4.257  batch=1/8  (0.00s)
+ep   60 | R=  -3.18  avg=  -6.55 | wm=10.5091  v=8.3673  π=-0.012771  H=4.257  batch=5/8  (0.00s)
+ep   80 | R=  -6.09  avg=  -6.75 | wm=10.0386  v=9.1701  π=-0.012771  H=4.257  batch=1/8  (0.00s)
+ep  100 | R=  -7.34  avg=  -6.44 | wm=9.2901  v=7.2326  π=-0.012770  H=4.257  batch=5/8  (0.00s)
+ep  120 | R=  -8.44  avg=  -7.01 | wm=10.4158  v=9.6383  π=-0.012770  H=4.257  batch=1/8  (0.00s)
+
+Final partial update on 5 buffered episode(s): wm=9.0145 v=9.1144 π=-0.012770
+
+C++ sim finished after 125 episodes.

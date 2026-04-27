@@ -1,0 +1,22 @@
+train_battleship: watching runs/comparison/20260426_230116/mappo_seed1/weights/
+  obs_dim=77  embed_dim=64  action_dim=3  n_agents=2
+  update_every=8  entropy_coef=0.003  grad_clip=1.0  lr_policy=0.0003
+Waiting for C++ sim…  (run: battleship-sim weights_bs/ --mode seqcomm)
+
+ep    0 | R=  -0.77  avg=  -0.77 | wm=nan  v=nan  π=+nan  H=nan  batch=1/8  (0.00s)
+ep   20 | R=  -5.12  avg=  +4.03 | wm=9.7739  v=9.1841  π=-0.012771  H=4.257  batch=5/8  (0.00s)
+ep   40 | R=  -2.65  avg=  +3.18 | wm=8.7525  v=6.9205  π=-0.012775  H=4.258  batch=1/8  (0.00s)
+ep   60 | R=  -4.14  avg=  +1.99 | wm=8.9176  v=12.6906  π=-0.012774  H=4.258  batch=5/8  (0.00s)
+ep   80 | R=  +6.00  avg=  +0.51 | wm=7.9576  v=7.2926  π=-0.012772  H=4.257  batch=1/8  (0.00s)
+ep  100 | R=  -1.92  avg=  +3.41 | wm=9.0433  v=20.6782  π=-0.012772  H=4.257  batch=5/8  (0.00s)
+ep  120 | R=  -6.11  avg=  +3.31 | wm=8.1067  v=11.0429  π=-0.012772  H=4.257  batch=1/8  (0.00s)
+ep  140 | R=  -2.10  avg=  +6.04 | wm=8.1642  v=15.8123  π=-0.012772  H=4.257  batch=5/8  (0.00s)
+ep  160 | R=  -3.51  avg=  -1.00 | wm=6.8532  v=11.0556  π=-0.012772  H=4.257  batch=1/8  (0.00s)
+ep  180 | R=  -3.40  avg=  +7.71 | wm=9.5969  v=29.2971  π=-0.012772  H=4.257  batch=5/8  (0.00s)
+ep  200 | R= +11.14  avg=  +3.77 | wm=6.5692  v=13.3380  π=-0.012772  H=4.257  batch=1/8  (0.00s)
+ep  220 | R= +12.29  avg=  +1.92 | wm=7.9127  v=10.0715  π=-0.012773  H=4.258  batch=5/8  (0.00s)
+ep  240 | R=  +8.00  avg=  +3.41 | wm=7.6985  v=14.5847  π=-0.012773  H=4.258  batch=1/8  (0.00s)
+
+Final partial update on 2 buffered episode(s): wm=5.6508 v=5.6450 π=-0.012773
+
+C++ sim finished after 250 episodes.

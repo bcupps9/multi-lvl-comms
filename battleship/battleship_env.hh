@@ -40,7 +40,8 @@ struct BattleshipConfig {
     int   n_agents    = 2;    // number of agent ships
     int   n_boss      = 2;    // number of boss ships
     int   sight_range = 4;    // Chebyshev observation radius
-    int   fire_range  = 3;    // Chebyshev firing radius
+    int   fire_range  = 3;    // Chebyshev firing radius (agents)
+    int   boss_fire_range = 3; // Chebyshev firing radius (boss heuristic)
     int   max_steps   = 60;   // episode cap
     float reward_hit_boss   =  1.f;
     float reward_hit_self   = -1.f;

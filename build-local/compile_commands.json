@@ -1,0 +1,104 @@
+[
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/Cotamer.dir/__/cotamer/cotamer.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "output": "robot_sim/CMakeFiles/Cotamer.dir/__/cotamer/cotamer.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/Cotamer.dir/__/cotamer/io.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "output": "robot_sim/CMakeFiles/Cotamer.dir/__/cotamer/io.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/SeqComm.dir/agent_action.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "output": "robot_sim/CMakeFiles/SeqComm.dir/agent_action.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/SeqComm.dir/gaussian_field_env.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/gaussian_field_env.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/gaussian_field_env.cc",
+  "output": "robot_sim/CMakeFiles/SeqComm.dir/gaussian_field_env.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/SeqComm.dir/intersection_env.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/intersection_env.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/intersection_env.cc",
+  "output": "robot_sim/CMakeFiles/SeqComm.dir/intersection_env.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++  -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/seqcomm-sim.dir/seqcomm_sim.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/seqcomm_sim.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/seqcomm_sim.cc",
+  "output": "robot_sim/CMakeFiles/seqcomm-sim.dir/seqcomm_sim.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/robot_sim",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/robot_sim -I/Users/luxhm/src/multi-lvl-comms/robot_sim/.. -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/seqcomm-sim-trained.dir/seqcomm_sim_trained.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/seqcomm_sim_trained.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/seqcomm_sim_trained.cc",
+  "output": "robot_sim/CMakeFiles/seqcomm-sim-trained.dir/seqcomm_sim_trained.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/poker",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/poker -I/Users/luxhm/src/multi-lvl-comms/poker/.. -I/Users/luxhm/src/multi-lvl-comms/poker/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/poker-sim.dir/poker_env.cc.o -c /Users/luxhm/src/multi-lvl-comms/poker/poker_env.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/poker/poker_env.cc",
+  "output": "poker/CMakeFiles/poker-sim.dir/poker_env.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/poker",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/poker -I/Users/luxhm/src/multi-lvl-comms/poker/.. -I/Users/luxhm/src/multi-lvl-comms/poker/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/poker-sim.dir/poker_sim.cc.o -c /Users/luxhm/src/multi-lvl-comms/poker/poker_sim.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/poker/poker_sim.cc",
+  "output": "poker/CMakeFiles/poker-sim.dir/poker_sim.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/poker",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/poker -I/Users/luxhm/src/multi-lvl-comms/poker/.. -I/Users/luxhm/src/multi-lvl-comms/poker/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/poker-sim.dir/__/robot_sim/agent_action.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "output": "poker/CMakeFiles/poker-sim.dir/__/robot_sim/agent_action.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/poker",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/poker -I/Users/luxhm/src/multi-lvl-comms/poker/.. -I/Users/luxhm/src/multi-lvl-comms/poker/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/poker-sim.dir/__/cotamer/cotamer.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "output": "poker/CMakeFiles/poker-sim.dir/__/cotamer/cotamer.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/poker",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/poker -I/Users/luxhm/src/multi-lvl-comms/poker/.. -I/Users/luxhm/src/multi-lvl-comms/poker/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/poker-sim.dir/__/cotamer/io.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "output": "poker/CMakeFiles/poker-sim.dir/__/cotamer/io.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/battleship",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/battleship -I/Users/luxhm/src/multi-lvl-comms/battleship/.. -I/Users/luxhm/src/multi-lvl-comms/battleship/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/battleship-sim.dir/battleship_env.cc.o -c /Users/luxhm/src/multi-lvl-comms/battleship/battleship_env.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/battleship/battleship_env.cc",
+  "output": "battleship/CMakeFiles/battleship-sim.dir/battleship_env.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/battleship",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/battleship -I/Users/luxhm/src/multi-lvl-comms/battleship/.. -I/Users/luxhm/src/multi-lvl-comms/battleship/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/battleship-sim.dir/battleship_sim.cc.o -c /Users/luxhm/src/multi-lvl-comms/battleship/battleship_sim.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/battleship/battleship_sim.cc",
+  "output": "battleship/CMakeFiles/battleship-sim.dir/battleship_sim.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/battleship",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/battleship -I/Users/luxhm/src/multi-lvl-comms/battleship/.. -I/Users/luxhm/src/multi-lvl-comms/battleship/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/battleship-sim.dir/__/robot_sim/agent_action.cc.o -c /Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/robot_sim/agent_action.cc",
+  "output": "battleship/CMakeFiles/battleship-sim.dir/__/robot_sim/agent_action.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/battleship",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/battleship -I/Users/luxhm/src/multi-lvl-comms/battleship/.. -I/Users/luxhm/src/multi-lvl-comms/battleship/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/battleship-sim.dir/__/cotamer/cotamer.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/cotamer.cc",
+  "output": "battleship/CMakeFiles/battleship-sim.dir/__/cotamer/cotamer.cc.o"
+},
+{
+  "directory": "/Users/luxhm/src/multi-lvl-comms/build-local/battleship",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DUSE_TORCH -I/Users/luxhm/src/multi-lvl-comms/battleship -I/Users/luxhm/src/multi-lvl-comms/battleship/.. -I/Users/luxhm/src/multi-lvl-comms/battleship/../robot_sim -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include -isystem /Users/luxhm/src/multi-lvl-comms/.venv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -std=gnu++23 -arch arm64 -g -O3 -march=native -W -Wall -o CMakeFiles/battleship-sim.dir/__/cotamer/io.cc.o -c /Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "file": "/Users/luxhm/src/multi-lvl-comms/cotamer/io.cc",
+  "output": "battleship/CMakeFiles/battleship-sim.dir/__/cotamer/io.cc.o"
+}
+]
