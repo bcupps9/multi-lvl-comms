@@ -27,11 +27,13 @@ SEEDS="${SEEDS:-0 1 2}"
 
 AGENTS="${AGENTS:-2}"
 BOSS="${BOSS:-1}"
-SIGHT="${SIGHT:-4}"
+SIGHT="${SIGHT:-2}"
 FIRE="${FIRE:-2}"
 STEPS="${STEPS:-60}"
 SURVIVE="${SURVIVE:-0.005}"
+PROXIMITY="${PROXIMITY:-0.01}"
 WIN_REWARD="${WIN_REWARD:-10}"
+CURRICULUM="${CURRICULUM:-0}"  # set to 1 to enable boss curriculum
 
 LR_ENC="${LR_ENC:-0.0001}"
 LR_WORLD="${LR_WORLD:-0.0003}"
@@ -39,7 +41,7 @@ GRAD_CLIP="${GRAD_CLIP:-1.0}"
 TRAINER_GRACE_SEC="${TRAINER_GRACE_SEC:-60}"
 CPP_AFTER_PY_GRACE_SEC="${CPP_AFTER_PY_GRACE_SEC:-300}"
 
-OBS_DIM=$(( (2 * SIGHT + 1) * (2 * SIGHT + 1) * 3 + 2 ))
+OBS_DIM=$(( (2 * SIGHT + 1) * (2 * SIGHT + 1) * 3 + 4 ))
 RUN_ROOT="${RUN_ROOT:-runs/battleship_grid/$(date +%Y%m%d_%H%M%S)}"
 SUMMARY_CSV="$RUN_ROOT/summary.csv"
 current_py_pid=""
@@ -47,12 +49,17 @@ current_cpp_pid=""
 current_run_id=""
 
 # name | update_every | lr_policy | entropy_coef | near_boss
-CONFIGS=(
-    "stable|8|0.0003|0.003|0.20"
-    "less_shaping|8|0.0003|0.003|0.05"
-    "more_stable|16|0.0003|0.003|0.10"
-    "lower_explore|8|0.0003|0.001|0.10"
-)
+# Global reward overrides: SURVIVE, PROXIMITY, WIN_REWARD env vars.
+# To run a single config: SINGLE_CONFIG="curriculum|8|0.0003|0.003|0.10" bash run_battleship_grid.sh
+if [[ -n "${SINGLE_CONFIG:-}" ]]; then
+    CONFIGS=("$SINGLE_CONFIG")
+else
+    CONFIGS=(
+        "curriculum|16|0.0003|0.003|0.10"
+        "curriculum_hi_ent|16|0.0003|0.010|0.10"
+        "curriculum_lo_lr|16|0.0001|0.003|0.10"
+    )
+fi
 
 find_existing_battleship_processes() {
     local matches=""
@@ -88,7 +95,7 @@ if [[ ! -x "$SIM_BIN" ]]; then
     make -C "$BUILD_DIR" battleship-sim
 fi
 
-printf 'run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,log_file,trainer_log\n' > "$SUMMARY_CSV"
+printf 'run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,final_curriculum_stage,log_file,trainer_log\n' > "$SUMMARY_CSV"
 
 cleanup_pair() {
     local py_pid="${1:-}"
@@ -157,6 +164,7 @@ timeout = sum(1 for r in tail if not r.get("agents_won") and not r.get("boss_won
 fire_dist = sum(float(r.get("mean_fire_dist", 0.0)) for r in tail) / n
 shots = sum(float(r.get("agent_shots", 0.0)) for r in tail)
 oob = sum(float(r.get("fire_oob", 0.0)) for r in tail) / max(1.0, shots)
+final_stage = rows[-1].get("curriculum_stage", -1) if rows else -1
 
 last_policy_std = ""
 last_entropy = ""
@@ -188,6 +196,7 @@ writer.writerow([
     f"{oob:.6f}",
     last_policy_std,
     last_entropy,
+    final_stage,
     log_file,
     trainer_log,
 ])
@@ -261,6 +270,10 @@ run_one() {
 
     (
         set +e
+        curriculum_flag=""
+        if [[ "$config_name" == "curriculum" ]] || [[ "${CURRICULUM:-0}" == "1" ]]; then
+            curriculum_flag="--curriculum"
+        fi
         "$SIM_BIN" "$weights_dir" \
             --mode "$MODE" \
             --episodes "$EPISODES" \
@@ -272,8 +285,10 @@ run_one() {
             --steps "$STEPS" \
             --survive "$SURVIVE" \
             --near-boss "$near_boss" \
+            --proximity "$PROXIMITY" \
             --win-reward "$WIN_REWARD" \
-            --log-dir "$log_dir" &
+            --log-dir "$log_dir" \
+            $curriculum_flag &
         child_pid=$!
         trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$cpp_status_file"; exit 143' INT TERM HUP
         wait "$child_pid"

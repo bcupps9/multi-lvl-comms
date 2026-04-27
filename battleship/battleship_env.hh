@@ -47,7 +47,12 @@ struct BattleshipConfig {
     float reward_hit_self   = -1.f;
     float reward_survive    =  0.005f; // per agent cell alive per step (small stabilizer)
     float reward_near_boss  =  0.20f;  // shaped reward for near-miss agent shots
+    float reward_proximity  =  0.01f;  // per-step reward for agent being close to boss (gradient for move)
     float reward_agents_win = 10.f;    // terminal reward for sinking all boss ships
+
+    // Curriculum knobs — updated mid-run by the simulator; env reads each episode.
+    int   boss_start_hp  = 3;    // 1/2/3: how many cells the boss starts with alive
+    float boss_miss_prob = 0.0f; // probability [0,1) each boss shot misses entirely
 };
 
 // ── Grid cell ──────────────────────────────────────────────────────────────────
@@ -109,6 +114,12 @@ struct BattleshipEnv : Environment {
 
     const BattleshipConfig& config() const { return cfg_; }
 
+    // Update curriculum parameters; takes effect on the next reset().
+    void set_curriculum(int boss_hp, float miss_prob) {
+        cfg_.boss_start_hp  = boss_hp;
+        cfg_.boss_miss_prob = miss_prob;
+    }
+
     // ── Episode statistics (valid after is_done()) ──────────────────────────────
     struct EpisodeStats {
         int   steps;
@@ -149,7 +160,7 @@ private:
 
     // Per-step output (set by step_env)
     std::vector<std::vector<float>> next_obs_;
-    float step_reward_ = 0.f;
+    std::vector<float> step_reward_;   // per-agent reward for the current step
 
     // Cotamer barrier state
     std::vector<std::vector<float>> pending_;

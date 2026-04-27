@@ -16,6 +16,7 @@ BattleshipEnv::BattleshipEnv(BattleshipConfig cfg, random_source& rng)
       agents_(cfg.n_agents),
       bosses_(cfg.n_boss),
       next_obs_(cfg.n_agents),
+      step_reward_(cfg.n_agents, 0.f),
       pending_(cfg.n_agents)
 {
     for (int i = 0; i < cfg.n_agents; ++i) { agents_[i].id = i; agents_[i].is_boss = false; }
@@ -41,6 +42,7 @@ std::vector<std::vector<float>> BattleshipEnv::reset() {
     ep_fire_offset_counts_.assign(fire_span * fire_span, 0);
     submitted_     = 0;
     results_ready_ = false;
+    std::fill(step_reward_.begin(), step_reward_.end(), 0.f);
 
     place_ships();
 
@@ -81,8 +83,16 @@ bool BattleshipEnv::try_place(Ship& s, bool is_boss) {
 }
 
 void BattleshipEnv::place_ships() {
-    for (auto& s : bosses_)
-        for (int i = 0; i < 500 && !try_place(s, true);  ++i);
+    for (auto& s : bosses_) {
+        for (int i = 0; i < 500 && !try_place(s, true); ++i);
+        // Curriculum: pre-kill excess cells so boss starts with boss_start_hp HP.
+        for (int p = cfg_.boss_start_hp; p < 3; ++p) {
+            if (!s.alive[p]) continue;
+            auto [r, c] = s.cell_of(p);
+            at(r, c) = EMPTY_CELL;
+            s.alive[p] = false;
+        }
+    }
     for (auto& s : agents_)
         for (int i = 0; i < 500 && !try_place(s, false); ++i);
 }
@@ -244,10 +254,12 @@ std::array<int, 3> BattleshipEnv::boss_policy(int boss_id) const {
 // Order: agents move → agents fire → bosses move → bosses fire.
 
 void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
-    static constexpr int DR[] = {0, -1, 1, 0,  0};  // indexed by move 0..4
+    static constexpr int DR[] = {0, -1, 1, 0,  0};
     static constexpr int DC[] = {0,  0, 0, 1, -1};
 
-    float reward = 0.f;
+    // Reset per-agent rewards; shared_reward is added to every agent at the end.
+    std::fill(step_reward_.begin(), step_reward_.end(), 0.f);
+    float shared_reward = 0.f;
 
     // Agents act.
     for (int i = 0; i < cfg_.n_agents; ++i) {
@@ -279,10 +291,22 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         }
 
         if (fire_at(false, tr, tc)) {
-            reward += cfg_.reward_hit_boss;
+            // Individual credit: only the agent who landed the hit gets this reward.
+            step_reward_[i] += cfg_.reward_hit_boss;
             ++ep_boss_hits_;
         } else {
-            reward += near_boss_reward(tr, tc);
+            step_reward_[i] += near_boss_reward(tr, tc);
+        }
+
+        // Per-step proximity reward: gradient signal for the move action.
+        // Scales linearly from reward_proximity (dist=0) to 0 (dist > fire_range).
+        if (cfg_.reward_proximity != 0.f) {
+            int pd = nearest_live_boss_dist(agents_[i].cr, agents_[i].cc);
+            if (pd != INT_MAX && pd <= cfg_.fire_range) {
+                float closeness = static_cast<float>(cfg_.fire_range + 1 - pd) /
+                                  static_cast<float>(cfg_.fire_range + 1);
+                step_reward_[i] += cfg_.reward_proximity * closeness;
+            }
         }
     }
 
@@ -291,16 +315,19 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         if (bosses_[b].sunk()) continue;
         auto [dir, fdr, fdc] = boss_policy(b);
         move_ship(bosses_[b], DR[dir], DC[dir]);
+        // Curriculum miss: boss shot may be skipped.
+        if (cfg_.boss_miss_prob > 0.f && rng_.coin_flip(cfg_.boss_miss_prob))
+            continue;
         if (fire_at(true, bosses_[b].cr + fdr, bosses_[b].cc + fdc)) {
-            reward += cfg_.reward_hit_self;
+            shared_reward += cfg_.reward_hit_self;
             ++ep_agent_hits_;
         }
     }
 
-    // Survival bonus: reward agents for keeping cells alive each step.
+    // Survival bonus (shared across all agents).
     if (cfg_.reward_survive != 0.f) {
         for (const auto& a : agents_)
-            reward += cfg_.reward_survive * a.hp();
+            shared_reward += cfg_.reward_survive * a.hp();
     }
 
     ++step_;
@@ -311,10 +338,13 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
                                  [](const Ship& s){ return s.sunk(); });
     done_ = all_boss || all_agent || step_ >= cfg_.max_steps;
     if (all_boss)
-        reward += cfg_.reward_agents_win;
+        shared_reward += cfg_.reward_agents_win;
 
-    step_reward_ = reward;
-    ep_reward_  += reward;
+    // Broadcast shared reward to every agent.
+    for (auto& r : step_reward_) r += shared_reward;
+
+    // ep_reward_ tracks agent-0's cumulative reward (used by episode_stats / MAPPO path).
+    ep_reward_ += step_reward_[0];
 
     for (int i = 0; i < cfg_.n_agents; ++i)
         next_obs_[i] = obs_for(i);
@@ -335,7 +365,7 @@ void BattleshipEnv::submit_action(int agent_id, std::span<const float> action) {
 cot::task<std::pair<std::vector<float>, float>>
 BattleshipEnv::get_result(int agent_id) {
     while (!results_ready_) co_await cot::after(1us);
-    co_return {next_obs_[agent_id], step_reward_};
+    co_return {next_obs_[agent_id], step_reward_[agent_id]};
 }
 
 // ── Sync interface ─────────────────────────────────────────────────────────────
@@ -343,18 +373,18 @@ BattleshipEnv::get_result(int agent_id) {
 BattleshipEnv::SyncResult
 BattleshipEnv::sync_step(const std::vector<std::vector<float>>& actions) {
     step_env(actions);
-    return {next_obs_, step_reward_};
+    return {next_obs_, step_reward_[0]};
 }
 
 // ── Observations ───────────────────────────────────────────────────────────────
 //
-// Local patch: (2·sight+1)² cells × 3 channels [own, ally, boss] + 2 scalars.
+// Local patch: (2·sight+1)² cells × 3 channels [own, ally, boss] + 4 scalars.
 // All channels 0 for OOB and empty cells.
-// Scalars: own_hp / 3, step / max_steps.
+// Scalars: own_hp / 3, step / max_steps, row / (M-1), col / (M-1).
 
 int BattleshipEnv::obs_dim() const {
     int patch = 2 * cfg_.sight_range + 1;
-    return patch * patch * 3 + 2;
+    return patch * patch * 3 + 4;
 }
 
 int BattleshipEnv::global_obs_dim() const {
@@ -386,6 +416,8 @@ std::vector<float> BattleshipEnv::obs_for(int agent_id) const {
 
     obs.push_back(me.hp() / 3.f);
     obs.push_back(step_ / (float)cfg_.max_steps);
+    obs.push_back(me.cr / (float)(M - 1));
+    obs.push_back(me.cc / (float)(M - 1));
     return obs;
 }
 

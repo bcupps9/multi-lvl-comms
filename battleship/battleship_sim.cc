@@ -73,6 +73,61 @@ static std::string mode_str(Mode m) {
     return "unknown";
 }
 
+// ── Curriculum ─────────────────────────────────────────────────────────────────
+
+struct CurriculumStage {
+    int   boss_hp;
+    float boss_miss;
+    const char* label;
+};
+
+// Stages progress from trivial (1-HP boss, 70% misses) to full strength.
+static constexpr CurriculumStage CURRICULUM[] = {
+    {1, 0.70f, "c0:hp1/miss70"},
+    {1, 0.40f, "c1:hp1/miss40"},
+    {1, 0.00f, "c2:hp1/miss0"},
+    {2, 0.50f, "c3:hp2/miss50"},
+    {2, 0.00f, "c4:hp2/miss0"},
+    {3, 0.40f, "c5:hp3/miss40"},
+    {3, 0.00f, "c6:hp3/miss0"},
+};
+static constexpr int N_CURRICULUM_STAGES = static_cast<int>(
+    sizeof(CURRICULUM) / sizeof(CURRICULUM[0]));
+
+struct CurriculumTracker {
+    // Advance to the next stage when win-rate over the last WINDOW episodes
+    // exceeds THRESH.  Window resets on advance so the new stage is evaluated
+    // independently.
+    static constexpr int   WINDOW = 200;
+    static constexpr float THRESH = 0.40f;
+
+    int stage = 0;
+    std::deque<bool> wins;
+
+    const CurriculumStage& current() const { return CURRICULUM[stage]; }
+    bool at_max() const { return stage >= N_CURRICULUM_STAGES - 1; }
+
+    // Record episode outcome; returns true if stage advanced.
+    bool record(bool won) {
+        wins.push_back(won);
+        if ((int)wins.size() > WINDOW) wins.pop_front();
+        if (at_max()) return false;
+        if ((int)wins.size() < WINDOW) return false;
+        int n_wins = (int)std::count(wins.begin(), wins.end(), true);
+        if ((float)n_wins / WINDOW >= THRESH) {
+            ++stage;
+            wins.clear();
+            return true;
+        }
+        return false;
+    }
+
+    float win_rate() const {
+        if (wins.empty()) return 0.f;
+        return (float)std::count(wins.begin(), wins.end(), true) / (float)wins.size();
+    }
+};
+
 // ── Episode stats struct ────────────────────────────────────────────────────────
 
 struct BsEpStats {
@@ -90,6 +145,7 @@ struct BsEpStats {
     std::vector<int> fire_dist_counts;
     std::array<int, 5> move_counts{};
     std::vector<int> fire_offset_counts;
+    int   curriculum_stage   = -1;  // -1 = no curriculum
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -367,6 +423,7 @@ static void write_meta(std::ofstream& f, Mode mode,
       << "\"reward_hit_self\": " << jn(cfg.reward_hit_self) << ", "
       << "\"reward_survive\": " << jn(cfg.reward_survive) << ", "
       << "\"reward_near_boss\": " << jn(cfg.reward_near_boss) << ", "
+      << "\"reward_proximity\": " << jn(cfg.reward_proximity) << ", "
       << "\"reward_agents_win\": " << jn(cfg.reward_agents_win) << ", "
       << "\"episodes\": " << n_ep << ", "
       << "\"timestamp\": \"" << now_iso() << "\""
@@ -399,7 +456,10 @@ static void write_ep_log(std::ofstream& f, int ep, const BsEpStats& s) {
         if (i) f << ", ";
         f << s.first_mover_counts[i];
     }
-    f << "]}\n";
+    f << "]";
+    if (s.curriculum_stage >= 0)
+        f << ", \"curriculum_stage\": " << s.curriculum_stage;
+    f << "}\n";
     f.flush();
 }
 
@@ -412,11 +472,13 @@ int main(int argc, char* argv[]) {
     bool             do_train  = true;
     int              seed      = -1;
     std::string      log_dir_str;
+    bool             use_curriculum = false;
     BattleshipConfig bcfg;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if      (arg == "--no-train")             do_train = false;
+        else if (arg == "--curriculum")           use_curriculum = true;
         else if (arg == "--mode"     && i+1<argc) mode   = parse_mode(argv[++i]);
         else if (arg == "--episodes" && i+1<argc) n_ep   = std::stoi(argv[++i]);
         else if (arg == "--seed"     && i+1<argc) seed   = std::stoi(argv[++i]);
@@ -428,19 +490,22 @@ int main(int argc, char* argv[]) {
         else if (arg == "--fire"     && i+1<argc) { bcfg.fire_range = std::stoi(argv[++i]); bcfg.boss_fire_range = bcfg.fire_range; }
         else if (arg == "--boss-fire" && i+1<argc) bcfg.boss_fire_range = std::stoi(argv[++i]);
         else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
-        else if (arg == "--survive"  && i+1<argc) bcfg.reward_survive = std::stof(argv[++i]);
-        else if (arg == "--near-boss" && i+1<argc) bcfg.reward_near_boss = std::stof(argv[++i]);
+        else if (arg == "--survive"    && i+1<argc) bcfg.reward_survive   = std::stof(argv[++i]);
+        else if (arg == "--near-boss"  && i+1<argc) bcfg.reward_near_boss  = std::stof(argv[++i]);
+        else if (arg == "--proximity"  && i+1<argc) bcfg.reward_proximity  = std::stof(argv[++i]);
         else if (arg == "--win-reward" && i+1<argc) bcfg.reward_agents_win = std::stof(argv[++i]);
-        else if (arg == "--no-survive")           bcfg.reward_survive = 0.f;
-        else if (arg == "--no-near-boss")         bcfg.reward_near_boss = 0.f;
+        else if (arg == "--no-survive")            bcfg.reward_survive   = 0.f;
+        else if (arg == "--no-near-boss")          bcfg.reward_near_boss  = 0.f;
+        else if (arg == "--no-proximity")          bcfg.reward_proximity  = 0.f;
         else if (arg[0] != '-')                   weights_dir = arg;
         else {
             std::print(stderr,
                 "usage: battleship-sim [<weights_dir>] [--mode seqcomm|fixed_order|mappo]\n"
                 "  [--episodes N] [--no-train] [--seed N] [--log-dir PATH]\n"
+                "  [--curriculum]\n"
                 "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n"
-                "  [--survive R] [--near-boss R] [--win-reward R]\n"
-                "  [--no-survive] [--no-near-boss]\n");
+                "  [--survive R] [--near-boss R] [--proximity R] [--win-reward R]\n"
+                "  [--no-survive] [--no-near-boss] [--no-proximity]\n");
             return 1;
         }
     }
@@ -502,6 +567,14 @@ int main(int argc, char* argv[]) {
                bcfg.reward_agents_win, n_ep,
                log_path.string());
 
+    // Curriculum setup: start at stage 0 if enabled.
+    CurriculumTracker curriculum;
+    if (use_curriculum) {
+        env.set_curriculum(CURRICULUM[0].boss_hp, CURRICULUM[0].boss_miss);
+        std::print("curriculum ON  stage={}  {}\n\n",
+                   curriculum.stage, CURRICULUM[0].label);
+    }
+
     float reward_sum = 0.f;
     std::vector<transition> mappo_batch;   // accumulates across episodes for MAPPO
     constexpr int MAPPO_UPDATE_EVERY = 8;
@@ -540,6 +613,19 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Curriculum auto-advance.
+        if (use_curriculum) {
+            stats.curriculum_stage = curriculum.stage;
+            bool advanced = curriculum.record(stats.agents_won);
+            if (advanced) {
+                const auto& s = curriculum.current();
+                env.set_curriculum(s.boss_hp, s.boss_miss);
+                std::print("\n*** curriculum advance → stage {} ({})  wr={:.0f}% ***\n\n",
+                           curriculum.stage, s.label,
+                           curriculum.win_rate() * 100.f);
+            }
+        }
+
         reward_sum += stats.total_reward;
         write_ep_log(log_file, ep, stats);
 
@@ -550,12 +636,14 @@ int main(int argc, char* argv[]) {
             fm += std::to_string(stats.first_mover_counts[i]);
         }
         fm += "]";
+        std::string cur_tag = use_curriculum
+            ? std::format("  c{}", curriculum.stage) : "";
         std::print("ep {:4d}  r={:+.2f}  steps={:3d}  boss_hits={:2d}  "
-                   "agent_hits={:2d}  {}  fm={}\n",
+                   "agent_hits={:2d}  {}  fm={}{}\n",
                    ep, stats.total_reward, stats.steps,
                    stats.boss_hits, stats.agent_hits,
                    stats.agents_won ? "WIN" : stats.boss_won ? "LOSS" : "time",
-                   fm);
+                   fm, cur_tag);
     }
 
     std::print("\navg reward: {:.3f}\n", reward_sum / n_ep);

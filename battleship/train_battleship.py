@@ -49,7 +49,7 @@ import torch.optim as optim
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 N_AGENTS   = 2
-OBS_DIM    = 245   # (2*4+1)^2 * 3 + 2  — local 9x9 patch * 3 channels + 2 scalars
+OBS_DIM    = 79    # (2*2+1)^2 * 3 + 4  — local 5x5 patch * 3 channels + 4 scalars
 ACTION_DIM = 3     # (move_dir, fire_dr, fire_dc)
 EMBED_DIM  = 64
 
@@ -81,7 +81,7 @@ class Encoder(nn.Module):
         self.obs_dim = obs_dim
         self.embed_dim = embed_dim
         self.channels = 3
-        self.scalar_dim = 2
+        self.scalar_dim = 4   # hp, step, row, col
 
         spatial_dim = obs_dim - self.scalar_dim
         patch_cells = spatial_dim // self.channels
@@ -331,7 +331,6 @@ def _assemble(raw, n_agents, obs_dim, action_dim):
         obs_all      = torch.stack([torch.tensor(step[i]['obs'])      for i in range(n_agents)])
         actions_all  = torch.stack([torch.tensor(step[i]['action'])   for i in range(n_agents)])
         next_obs_all = torch.stack([torch.tensor(step[i]['next_obs']) for i in range(n_agents)])
-        reward = step[0]['reward']
 
         for i in range(n_agents):
             rec = step[i]
@@ -342,7 +341,7 @@ def _assemble(raw, n_agents, obs_dim, action_dim):
                 'actions_all': actions_all,      # (n_agents, action_dim)
                 'up_pad_i':    torch.tensor(rec['up_pad']),   # (n_agents, action_dim)
                 'next_obs_all': next_obs_all,
-                'reward':      reward,
+                'reward':      rec['reward'],    # per-agent: hit credit goes to the shooter
                 'value':       rec['value'],
                 'log_prob':    rec['log_prob'],
             })
@@ -390,8 +389,16 @@ def loss_policy(encoder, attn_a, policy,
     entropy = dist.entropy().sum(dim=-1).mean()             # scalar
     ratio = (log_probs - log_probs_old).exp()
     clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+    is_clipped = (ratio < 1 - clip_eps) | (ratio > 1 + clip_eps)
     surrogate = -torch.min(ratio * advantages, clipped * advantages).mean()
-    return surrogate - entropy_coef * entropy, entropy.item()
+    extras = {
+        'entropy': entropy.item(),
+        'clip_frac': is_clipped.float().mean().item(),
+        'ratio_mean': ratio.mean().item(),
+        'ratio_max': ratio.max().item(),
+        'policy_mean': dist.mean.detach(),   # (B, action_dim) for stats
+    }
+    return surrogate - entropy_coef * entropy, extras
 
 
 def loss_world_model(encoder, attn_w, world_model,
@@ -410,6 +417,9 @@ def loss_world_model(encoder, attn_w, world_model,
 
 
 # ── Update ────────────────────────────────────────────────────────────────────
+
+PPO_EPOCHS = 4   # policy/value epochs per collected batch
+
 
 def update_batch(episodes, n_agents, nets,
                  opt_enc, opt_world, opt_pol,
@@ -473,7 +483,16 @@ def update_batch(episodes, n_agents, nets,
     adv_pv      = torch.tensor(adv_list,  dtype=torch.float32)
     lp_old_pv   = torch.tensor(lp_list,   dtype=torch.float32)
 
+    # Capture pre-normalisation advantage stats for diagnostics.
+    adv_raw = adv_pv.clone()
     adv_pv = (adv_pv - adv_pv.mean()) / (adv_pv.std() + 1e-8)
+
+    def _grad_norm(params):
+        total = 0.0
+        for p in params:
+            if p.grad is not None:
+                total += p.grad.detach().norm().item() ** 2
+        return total ** 0.5
 
     # ── World model update (Eq 4) ──────────────────────────────────────────────
     opt_enc.zero_grad()
@@ -481,6 +500,8 @@ def update_batch(episodes, n_agents, nets,
     lw = loss_world_model(encoder, attn_w, world_model,
                           obs_wm, actions_wm, next_obs_wm, rewards_wm)
     lw.backward()
+    gn_wm  = _grad_norm(list(attn_w.parameters()) + list(world_model.parameters()))
+    gn_enc_wm = _grad_norm(encoder.parameters())
     if grad_clip > 0:
         nn.utils.clip_grad_norm_(
             list(encoder.parameters()) +
@@ -490,26 +511,69 @@ def update_batch(episodes, n_agents, nets,
         )
     opt_world.step()
 
-    # Encoder grads from world-model survive here; policy adds its own below.
-    opt_pol.zero_grad()
-    lv = loss_value(encoder, attn_a, critic, obs_self_pv, up_pv, returns_pv)
-    lp, entropy = loss_policy(encoder, attn_a, policy,
-                              obs_self_pv, up_pv, actions_pv,
-                              adv_pv, lp_old_pv,
-                              entropy_coef=entropy_coef)
-    (lv + lp).backward()
-    if grad_clip > 0:
-        nn.utils.clip_grad_norm_(
-            list(encoder.parameters()) +
-            list(attn_a.parameters()) +
-            list(policy.parameters()) +
-            list(critic.parameters()),
-            grad_clip,
-        )
-    opt_pol.step()
-    opt_enc.step()
+    # Policy/value: PPO_EPOCHS passes over the same batch.
+    # log_probs_old are frozen from trajectory collection (lp_old_pv).
+    # Re-computing log_probs each epoch lets the ratio diverge from 1 as
+    # the policy updates, so the clip actually fires in later epochs.
+    gn_pol = gn_critic = gn_enc_pol = 0.0
+    lv_last = lp_last = 0.0
+    pol_extras_last = {}
+    for epoch in range(PPO_EPOCHS):
+        opt_pol.zero_grad()
+        lv = loss_value(encoder, attn_a, critic, obs_self_pv, up_pv, returns_pv)
+        lp, pol_extras = loss_policy(encoder, attn_a, policy,
+                                     obs_self_pv, up_pv, actions_pv,
+                                     adv_pv, lp_old_pv,
+                                     entropy_coef=entropy_coef)
+        (lv + lp).backward()
+        gn_pol     = _grad_norm(list(policy.parameters()) + list(attn_a.parameters()))
+        gn_critic  = _grad_norm(critic.parameters())
+        gn_enc_pol = _grad_norm(encoder.parameters())
+        if grad_clip > 0:
+            nn.utils.clip_grad_norm_(
+                list(encoder.parameters()) +
+                list(attn_a.parameters()) +
+                list(policy.parameters()) +
+                list(critic.parameters()),
+                grad_clip,
+            )
+        opt_pol.step()
+        opt_enc.step()
+        lv_last, lp_last, pol_extras_last = lv.item(), lp.item(), pol_extras
 
-    return {'wm': lw.item(), 'value': lv.item(), 'policy': lp.item(), 'entropy': entropy}
+    # Value calibration: compare mean predicted V to mean return.
+    with torch.no_grad():
+        h_cal   = encoder(obs_self_pv)
+        ctx_cal = attn_a(h_cal, up_pv)
+        v_pred  = critic(ctx_cal)
+
+    pm = pol_extras_last['policy_mean']
+    return {
+        'wm':            lw.item(),
+        'value':         lv_last,
+        'policy':        lp_last,
+        'entropy':       pol_extras_last['entropy'],
+        'clip_frac':     pol_extras_last['clip_frac'],
+        'ratio_mean':    pol_extras_last['ratio_mean'],
+        'ratio_max':     pol_extras_last['ratio_max'],
+        'adv_mean_raw':  adv_raw.mean().item(),
+        'adv_std_raw':   adv_raw.std().item(),
+        'adv_max_raw':   adv_raw.max().item(),
+        'adv_min_raw':   adv_raw.min().item(),
+        'returns_mean':  returns_pv.mean().item(),
+        'returns_std':   returns_pv.std().item(),
+        'v_pred_mean':   v_pred.mean().item(),
+        'v_pred_std':    v_pred.std().item(),
+        'gn_wm':         gn_wm,
+        'gn_enc_wm':     gn_enc_wm,
+        'gn_pol':        gn_pol,
+        'gn_critic':     gn_critic,
+        'gn_enc_pol':    gn_enc_pol,
+        'pmean_mean':    pm.mean().item(),
+        'pmean_std':     pm.std().item(),
+        'batch_steps':   len(adv_pv),
+        'ppo_epochs':    PPO_EPOCHS,
+    }
 
 
 def update_episode(transitions, n_agents, nets,
@@ -611,18 +675,43 @@ def write_trainer_update(f, update_idx: int, ep: int, batch_size: int,
         return
     log_std = policy.log_std.detach().cpu()
     row = {
-        'update': update_idx,
-        'last_episode': ep,
-        'batch_size': batch_size,
-        'world_model_loss': losses['wm'],
-        'value_loss': losses['value'],
-        'policy_loss': losses['policy'],
-        'entropy': losses['entropy'],
+        'update':             update_idx,
+        'last_episode':       ep,
+        'batch_size':         batch_size,
+        'batch_steps':        losses.get('batch_steps', 0),
+        # Losses
+        'world_model_loss':   losses['wm'],
+        'value_loss':         losses['value'],
+        'policy_loss':        losses['policy'],
+        'entropy':            losses['entropy'],
+        # PPO health
+        'clip_frac':          losses.get('clip_frac', 0.0),
+        'ratio_mean':         losses.get('ratio_mean', 1.0),
+        'ratio_max':          losses.get('ratio_max', 1.0),
+        # Advantage stats (pre-normalisation) — near-zero std = no learning signal
+        'adv_mean_raw':       losses.get('adv_mean_raw', 0.0),
+        'adv_std_raw':        losses.get('adv_std_raw', 0.0),
+        'adv_max_raw':        losses.get('adv_max_raw', 0.0),
+        'adv_min_raw':        losses.get('adv_min_raw', 0.0),
+        # Value calibration — v_pred_mean should track returns_mean
+        'returns_mean':       losses.get('returns_mean', 0.0),
+        'returns_std':        losses.get('returns_std', 0.0),
+        'v_pred_mean':        losses.get('v_pred_mean', 0.0),
+        'v_pred_std':         losses.get('v_pred_std', 0.0),
+        # Gradient norms — near-zero = dead module, huge = exploding
+        'gn_wm':              losses.get('gn_wm', 0.0),
+        'gn_enc_wm':          losses.get('gn_enc_wm', 0.0),
+        'gn_pol':             losses.get('gn_pol', 0.0),
+        'gn_critic':          losses.get('gn_critic', 0.0),
+        'gn_enc_pol':         losses.get('gn_enc_pol', 0.0),
+        # Policy output statistics
         'policy_log_std_mean': float(log_std.mean()),
-        'policy_log_std_min': float(log_std.min()),
-        'policy_log_std_max': float(log_std.max()),
-        'policy_std_mean': float(log_std.exp().mean()),
-        'elapsed_sec': elapsed,
+        'policy_log_std_min':  float(log_std.min()),
+        'policy_log_std_max':  float(log_std.max()),
+        'policy_std_mean':     float(log_std.exp().mean()),
+        'pmean_mean':          losses.get('pmean_mean', 0.0),
+        'pmean_std':           losses.get('pmean_std', 0.0),
+        'elapsed_sec':         elapsed,
     }
     f.write(json.dumps(row) + '\n')
     f.flush()
@@ -771,12 +860,18 @@ def main():
         if ep % LOG_EVERY == 0:
             recent = reward_hist[-LOG_EVERY:]
             avg = sum(recent) / len(recent)
+            clip  = last_losses.get('clip_frac', float('nan'))
+            gn_p  = last_losses.get('gn_pol', float('nan'))
+            gn_c  = last_losses.get('gn_critic', float('nan'))
+            adv_s = last_losses.get('adv_std_raw', float('nan'))
             print(
                 f'ep {ep:4d} | R={ep_reward:+7.2f}  avg={avg:+7.2f} | '
                 f'wm={last_losses["wm"]:.4f}  '
                 f'v={last_losses["value"]:.4f}  '
                 f'π={last_losses["policy"]:+.6f}  '
                 f'H={last_losses["entropy"]:.3f}  '
+                f'clip={clip:.2f}  adv_std={adv_s:.3f}  '
+                f'gn_π={gn_p:.3f}  gn_V={gn_c:.3f}  '
                 f'batch={len(batch)}/{update_every}  '
                 f'({elapsed:.2f}s)'
             )

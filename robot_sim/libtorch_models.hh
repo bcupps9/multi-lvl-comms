@@ -238,10 +238,8 @@ struct LibtorchNeuralModels : NeuralModels {
         world_model_ = load("world_model.pt");
         policy_      = load("policy.pt");
         critic_      = load("critic.pt");
-        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_}) {
+        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_})
             m->eval();
-            *m = torch::jit::optimize_for_inference(*m);
-        }
     }
 
     // Fast per-episode weight update: read raw float32 blob written by
@@ -279,17 +277,19 @@ struct LibtorchNeuralModels : NeuralModels {
         if (offset != n_floats)
             throw std::runtime_error("weights.bin: parameter count mismatch");
 
-        // Rebuild inference-optimised copies from updated masters.
+        // Rebuild inference copies from updated masters.
+        // NOTE: optimize_for_inference is intentionally omitted here — it
+        // registers JIT graph artifacts in a global libtorch cache and is
+        // never freed, causing unbounded memory growth across updates.
+        // The one-time optimization in the constructor is sufficient.
         encoder_     = master_encoder_.deepcopy();
         attn_a_      = master_attn_a_.deepcopy();
         attn_w_      = master_attn_w_.deepcopy();
         world_model_ = master_world_model_.deepcopy();
         policy_      = master_policy_.deepcopy();
         critic_      = master_critic_.deepcopy();
-        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_}) {
+        for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_})
             m->eval();
-            *m = torch::jit::optimize_for_inference(*m);
-        }
     }
 
 private:
