@@ -36,6 +36,7 @@
 #include <array>
 #include <chrono>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -78,53 +79,115 @@ static std::string mode_str(Mode m) {
 struct CurriculumStage {
     int   boss_hp;
     float boss_miss;
+    int   boss_fire_period;
+    int   boss_aim_lag;
+    int   max_steps;
     const char* label;
 };
 
-// Stages progress from trivial (1-HP boss, 70% misses) to full strength.
+// Stages progress by HP and deterministic boss tempo.  The boss no longer needs
+// random misses to be learnable: it fires on a predictable cadence and, by
+// default, aims at the previous-step agent cells so moving can dodge.
 static constexpr CurriculumStage CURRICULUM[] = {
-    {1, 0.70f, "c0:hp1/miss70"},
-    {1, 0.40f, "c1:hp1/miss40"},
-    {1, 0.00f, "c2:hp1/miss0"},
-    {2, 0.50f, "c3:hp2/miss50"},
-    {2, 0.00f, "c4:hp2/miss0"},
-    {3, 0.40f, "c5:hp3/miss40"},
-    {3, 0.00f, "c6:hp3/miss0"},
+    {1, 0.0f, 12, 1, 30, "c0:hp1/p12/t30"},
+    {1, 0.0f, 10, 1, 28, "c1:hp1/p10/t28"},
+    {1, 0.0f,  8, 1, 26, "c2:hp1/p8/t26"},
+    {1, 0.0f,  6, 1, 24, "c3:hp1/p6/t24"},
+    {2, 0.0f, 12, 1, 46, "c4:hp2/p12/t46"},
+    {2, 0.0f, 10, 1, 42, "c5:hp2/p10/t42"},
+    {2, 0.0f,  8, 1, 38, "c6:hp2/p8/t38"},
+    {2, 0.0f,  6, 1, 34, "c7:hp2/p6/t34"},
+    {2, 0.0f,  4, 1, 32, "c8:hp2/p4/t32"},
+    {3, 0.0f,  8, 1, 60, "c9:hp3/p8/t60"},
+    {3, 0.0f,  6, 1, 54, "c10:hp3/p6/t54"},
+    {3, 0.0f,  4, 1, 50, "c11:hp3/p4/t50"},
 };
 static constexpr int N_CURRICULUM_STAGES = static_cast<int>(
     sizeof(CURRICULUM) / sizeof(CURRICULUM[0]));
 
 struct CurriculumTracker {
-    // Advance to the next stage when win-rate over the last WINDOW episodes
-    // exceeds THRESH.  Window resets on advance so the new stage is evaluated
-    // independently.
-    static constexpr int   WINDOW = 200;
-    static constexpr float THRESH = 0.40f;
+    // Advance only when the agents are winning because they can aim, not merely
+    // because the current stage is forgiving.  Window resets on advance so the
+    // next stage is evaluated independently.
+    static constexpr int WINDOW = 300;
+
+    struct Sample {
+        bool won;
+        int boss_hits;
+        int agent_shots;
+    };
 
     int stage = 0;
-    std::deque<bool> wins;
+    std::deque<Sample> window;
+    float last_win_rate = 0.f;
+    float last_hit_rate = 0.f;
+    float last_zero_hit_rate = 0.f;
 
     const CurriculumStage& current() const { return CURRICULUM[stage]; }
     bool at_max() const { return stage >= N_CURRICULUM_STAGES - 1; }
 
+    float target_win_rate() const {
+        int hp = current().boss_hp;
+        if (hp <= 1) return 0.60f;
+        if (hp == 2) return 0.62f;
+        return 0.55f;
+    }
+
+    float target_hit_rate() const {
+        int hp = current().boss_hp;
+        if (hp <= 1) return 0.014f;
+        if (hp == 2) return 0.025f;
+        return 0.032f;
+    }
+
+    float target_zero_hit_rate() const {
+        int hp = current().boss_hp;
+        if (hp <= 1) return 0.42f;
+        if (hp == 2) return 0.12f;
+        return 0.08f;
+    }
+
+    void update_metrics() {
+        if (window.empty()) {
+            last_win_rate = last_hit_rate = last_zero_hit_rate = 0.f;
+            return;
+        }
+
+        int wins = 0;
+        int zero_hits = 0;
+        int boss_hits = 0;
+        int shots = 0;
+        for (const auto& s : window) {
+            wins += s.won ? 1 : 0;
+            zero_hits += s.boss_hits == 0 ? 1 : 0;
+            boss_hits += s.boss_hits;
+            shots += s.agent_shots;
+        }
+
+        last_win_rate = static_cast<float>(wins) / static_cast<float>(window.size());
+        last_zero_hit_rate = static_cast<float>(zero_hits) / static_cast<float>(window.size());
+        last_hit_rate = shots > 0
+            ? static_cast<float>(boss_hits) / static_cast<float>(shots)
+            : 0.f;
+    }
+
     // Record episode outcome; returns true if stage advanced.
-    bool record(bool won) {
-        wins.push_back(won);
-        if ((int)wins.size() > WINDOW) wins.pop_front();
+    bool record(bool won, int boss_hits, int agent_shots) {
+        window.push_back({won, boss_hits, agent_shots});
+        if ((int)window.size() > WINDOW) window.pop_front();
+        update_metrics();
+
         if (at_max()) return false;
-        if ((int)wins.size() < WINDOW) return false;
-        int n_wins = (int)std::count(wins.begin(), wins.end(), true);
-        if ((float)n_wins / WINDOW >= THRESH) {
+        if ((int)window.size() < WINDOW) return false;
+
+        if (last_win_rate >= target_win_rate() &&
+            last_hit_rate >= target_hit_rate() &&
+            last_zero_hit_rate <= target_zero_hit_rate()) {
             ++stage;
-            wins.clear();
+            window.clear();
             return true;
         }
         return false;
-    }
-
-    float win_rate() const {
-        if (wins.empty()) return 0.f;
-        return (float)std::count(wins.begin(), wins.end(), true) / (float)wins.size();
     }
 };
 
@@ -418,6 +481,11 @@ static void write_meta(std::ofstream& f, Mode mode,
       << "\"n_boss\": " << cfg.n_boss << ", "
       << "\"sight_range\": " << cfg.sight_range << ", "
       << "\"fire_range\": " << cfg.fire_range << ", "
+      << "\"boss_fire_range\": " << cfg.boss_fire_range << ", "
+      << "\"boss_fire_period\": " << cfg.boss_fire_period << ", "
+      << "\"boss_aim_lag\": " << cfg.boss_aim_lag << ", "
+      << "\"boss_start_hp\": " << cfg.boss_start_hp << ", "
+      << "\"boss_miss_prob\": " << jn(cfg.boss_miss_prob) << ", "
       << "\"max_steps\": " << cfg.max_steps << ", "
       << "\"reward_hit_boss\": " << jn(cfg.reward_hit_boss) << ", "
       << "\"reward_hit_self\": " << jn(cfg.reward_hit_self) << ", "
@@ -489,10 +557,14 @@ int main(int argc, char* argv[]) {
         else if (arg == "--sight"    && i+1<argc) bcfg.sight_range = std::stoi(argv[++i]);
         else if (arg == "--fire"     && i+1<argc) { bcfg.fire_range = std::stoi(argv[++i]); bcfg.boss_fire_range = bcfg.fire_range; }
         else if (arg == "--boss-fire" && i+1<argc) bcfg.boss_fire_range = std::stoi(argv[++i]);
+        else if (arg == "--boss-fire-period" && i+1<argc) bcfg.boss_fire_period = std::stoi(argv[++i]);
+        else if (arg == "--boss-aim-lag" && i+1<argc) bcfg.boss_aim_lag = std::stoi(argv[++i]);
         else if (arg == "--steps"    && i+1<argc) bcfg.max_steps      = std::stoi(argv[++i]);
         else if (arg == "--survive"    && i+1<argc) bcfg.reward_survive   = std::stof(argv[++i]);
         else if (arg == "--near-boss"  && i+1<argc) bcfg.reward_near_boss  = std::stof(argv[++i]);
         else if (arg == "--proximity"  && i+1<argc) bcfg.reward_proximity  = std::stof(argv[++i]);
+        else if (arg == "--hit-boss"   && i+1<argc) bcfg.reward_hit_boss   = std::stof(argv[++i]);
+        else if (arg == "--hit-self"   && i+1<argc) bcfg.reward_hit_self   = std::stof(argv[++i]);
         else if (arg == "--win-reward" && i+1<argc) bcfg.reward_agents_win = std::stof(argv[++i]);
         else if (arg == "--no-survive")            bcfg.reward_survive   = 0.f;
         else if (arg == "--no-near-boss")          bcfg.reward_near_boss  = 0.f;
@@ -504,7 +576,9 @@ int main(int argc, char* argv[]) {
                 "  [--episodes N] [--no-train] [--seed N] [--log-dir PATH]\n"
                 "  [--curriculum]\n"
                 "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n"
+                "  [--boss-fire N] [--boss-fire-period N] [--boss-aim-lag N]\n"
                 "  [--survive R] [--near-boss R] [--proximity R] [--win-reward R]\n"
+                "  [--hit-boss R] [--hit-self R]\n"
                 "  [--no-survive] [--no-near-boss] [--no-proximity]\n");
             return 1;
         }
@@ -522,6 +596,16 @@ int main(int argc, char* argv[]) {
 
     random_source rng;
     if (seed >= 0) rng.seed((uint64_t)seed);
+
+    CurriculumTracker curriculum;
+    if (use_curriculum) {
+        const auto& s = curriculum.current();
+        bcfg.boss_start_hp = s.boss_hp;
+        bcfg.boss_miss_prob = s.boss_miss;
+        bcfg.boss_fire_period = s.boss_fire_period;
+        bcfg.boss_aim_lag = s.boss_aim_lag;
+        bcfg.max_steps = s.max_steps;
+    }
 
     BattleshipEnv env(bcfg, rng);
 
@@ -560,17 +644,21 @@ int main(int argc, char* argv[]) {
     write_meta(log_file, mode, bcfg, n_ep);
 
     std::print("battleship-sim  mode={}  M={}  agents={}  boss={}  sight={}  fire={}  "
-               "steps={}  survive={}  near_boss={}  win_reward={}  episodes={}\nlog: {}\n\n",
+               "boss_period={}  boss_lag={}  steps={}  survive={}  near_boss={}  "
+               "win_reward={}  episodes={}\nlog: {}\n\n",
                mode_str(mode), bcfg.M, bcfg.n_agents, bcfg.n_boss,
-               bcfg.sight_range, bcfg.fire_range, bcfg.max_steps,
+               bcfg.sight_range, bcfg.fire_range,
+               bcfg.boss_fire_period, bcfg.boss_aim_lag, bcfg.max_steps,
                bcfg.reward_survive, bcfg.reward_near_boss,
                bcfg.reward_agents_win, n_ep,
                log_path.string());
 
     // Curriculum setup: start at stage 0 if enabled.
-    CurriculumTracker curriculum;
     if (use_curriculum) {
-        env.set_curriculum(CURRICULUM[0].boss_hp, CURRICULUM[0].boss_miss);
+        env.set_curriculum(CURRICULUM[0].boss_hp, CURRICULUM[0].boss_miss,
+                           CURRICULUM[0].boss_fire_period,
+                           CURRICULUM[0].boss_aim_lag,
+                           CURRICULUM[0].max_steps);
         std::print("curriculum ON  stage={}  {}\n\n",
                    curriculum.stage, CURRICULUM[0].label);
     }
@@ -616,13 +704,20 @@ int main(int argc, char* argv[]) {
         // Curriculum auto-advance.
         if (use_curriculum) {
             stats.curriculum_stage = curriculum.stage;
-            bool advanced = curriculum.record(stats.agents_won);
+            bool advanced = curriculum.record(stats.agents_won,
+                                              stats.boss_hits,
+                                              stats.agent_shots);
             if (advanced) {
                 const auto& s = curriculum.current();
-                env.set_curriculum(s.boss_hp, s.boss_miss);
-                std::print("\n*** curriculum advance → stage {} ({})  wr={:.0f}% ***\n\n",
+                env.set_curriculum(s.boss_hp, s.boss_miss,
+                                   s.boss_fire_period, s.boss_aim_lag,
+                                   s.max_steps);
+                std::print("\n*** curriculum advance → stage {} ({})  "
+                           "wr={:.0f}% hit/shot={:.1f}% zero={:.0f}% ***\n\n",
                            curriculum.stage, s.label,
-                           curriculum.win_rate() * 100.f);
+                           curriculum.last_win_rate * 100.f,
+                           curriculum.last_hit_rate * 100.f,
+                           curriculum.last_zero_hit_rate * 100.f);
             }
         }
 

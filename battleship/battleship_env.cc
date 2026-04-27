@@ -15,6 +15,8 @@ BattleshipEnv::BattleshipEnv(BattleshipConfig cfg, random_source& rng)
       grid_(cfg.M * cfg.M, EMPTY_CELL),
       agents_(cfg.n_agents),
       bosses_(cfg.n_boss),
+      prev_agent_cells_(cfg.n_agents),
+      prev_agent_alive_(cfg.n_agents),
       next_obs_(cfg.n_agents),
       step_reward_(cfg.n_agents, 0.f),
       pending_(cfg.n_agents)
@@ -45,6 +47,7 @@ std::vector<std::vector<float>> BattleshipEnv::reset() {
     std::fill(step_reward_.begin(), step_reward_.end(), 0.f);
 
     place_ships();
+    snapshot_agent_cells();
 
     std::vector<std::vector<float>> obs;
     obs.reserve(cfg_.n_agents);
@@ -135,6 +138,16 @@ void BattleshipEnv::move_ship(Ship& s, int dr, int dc) {
     }
 }
 
+void BattleshipEnv::snapshot_agent_cells() {
+    for (int i = 0; i < cfg_.n_agents; ++i) {
+        for (int p = 0; p < 3; ++p) {
+            prev_agent_alive_[i][p] = agents_[i].alive[p];
+            auto [r, c] = agents_[i].cell_of(p);
+            prev_agent_cells_[i][p] = {r, c};
+        }
+    }
+}
+
 // ── Firing ─────────────────────────────────────────────────────────────────────
 
 bool BattleshipEnv::fire_at(bool by_boss, int tr, int tc) {
@@ -202,7 +215,7 @@ std::pair<int, int> BattleshipEnv::decode_fire(float dr_raw, float dc_raw, int r
 
 // ── Boss policy ────────────────────────────────────────────────────────────────
 //
-// Fire on the nearest agent cell within fire_range (Chebyshev).
+// Fire on the nearest target agent cell within fire_range (Chebyshev).
 // If none in range: move one step toward the nearest agent cell (global vision).
 // If in range: stay put (already close enough to fire effectively).
 
@@ -210,17 +223,33 @@ std::array<int, 3> BattleshipEnv::boss_policy(int boss_id) const {
     const Ship& b = bosses_[boss_id];
     int R = cfg_.boss_fire_range;
 
-    // Nearest in-range agent cell → fire target.
+    // Nearest in-range target cell -> fire target. With boss_aim_lag enabled,
+    // target cells come from the previous step; current cells are still used for
+    // movement, so standing still is dangerous and moving can dodge.
     int best_dist = INT_MAX, fdr = 0, fdc = 0;
     bool found = false;
-    for (const Ship& a : agents_) {
-        for (int p = 0; p < 3; ++p) {
-            if (!a.alive[p]) continue;
-            auto [r, c] = a.cell_of(p);
-            int d = std::max(std::abs(r - b.cr), std::abs(c - b.cc));
-            if (d <= R && d < best_dist) {
-                best_dist = d; fdr = r - b.cr; fdc = c - b.cc;
-                found = true;
+    if (cfg_.boss_aim_lag > 0) {
+        for (int i = 0; i < cfg_.n_agents; ++i) {
+            for (int p = 0; p < 3; ++p) {
+                if (!prev_agent_alive_[i][p]) continue;
+                auto [r, c] = prev_agent_cells_[i][p];
+                int d = std::max(std::abs(r - b.cr), std::abs(c - b.cc));
+                if (d <= R && d < best_dist) {
+                    best_dist = d; fdr = r - b.cr; fdc = c - b.cc;
+                    found = true;
+                }
+            }
+        }
+    } else {
+        for (const Ship& a : agents_) {
+            for (int p = 0; p < 3; ++p) {
+                if (!a.alive[p]) continue;
+                auto [r, c] = a.cell_of(p);
+                int d = std::max(std::abs(r - b.cr), std::abs(c - b.cc));
+                if (d <= R && d < best_dist) {
+                    best_dist = d; fdr = r - b.cr; fdc = c - b.cc;
+                    found = true;
+                }
             }
         }
     }
@@ -315,6 +344,9 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         if (bosses_[b].sunk()) continue;
         auto [dir, fdr, fdc] = boss_policy(b);
         move_ship(bosses_[b], DR[dir], DC[dir]);
+        int fire_period = std::max(1, cfg_.boss_fire_period);
+        if (((step_ + 1 + b) % fire_period) != 0)
+            continue;
         // Curriculum miss: boss shot may be skipped.
         if (cfg_.boss_miss_prob > 0.f && rng_.coin_flip(cfg_.boss_miss_prob))
             continue;
@@ -348,6 +380,7 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
 
     for (int i = 0; i < cfg_.n_agents; ++i)
         next_obs_[i] = obs_for(i);
+    snapshot_agent_cells();
 }
 
 // ── Barrier interface ──────────────────────────────────────────────────────────

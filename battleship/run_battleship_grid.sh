@@ -29,9 +29,13 @@ AGENTS="${AGENTS:-2}"
 BOSS="${BOSS:-1}"
 SIGHT="${SIGHT:-2}"
 FIRE="${FIRE:-2}"
+BOSS_FIRE_PERIOD="${BOSS_FIRE_PERIOD:-8}"
+BOSS_AIM_LAG="${BOSS_AIM_LAG:-1}"
 STEPS="${STEPS:-60}"
 SURVIVE="${SURVIVE:-0.005}"
-PROXIMITY="${PROXIMITY:-0.01}"
+PROXIMITY="${PROXIMITY:-0.02}"
+HIT_BOSS="${HIT_BOSS:-2.0}"
+HIT_SELF="${HIT_SELF:--0.3}"
 WIN_REWARD="${WIN_REWARD:-10}"
 CURRICULUM="${CURRICULUM:-0}"  # set to 1 to enable boss curriculum
 
@@ -55,9 +59,9 @@ if [[ -n "${SINGLE_CONFIG:-}" ]]; then
     CONFIGS=("$SINGLE_CONFIG")
 else
     CONFIGS=(
-        "curriculum|16|0.0003|0.003|0.10"
-        "curriculum_hi_ent|16|0.0003|0.010|0.10"
-        "curriculum_lo_lr|16|0.0001|0.003|0.10"
+        "curriculum|16|0.0003|0.003|0.15"
+        "curriculum_hi_ent|16|0.0003|0.010|0.15"
+        "curriculum_lo_lr|16|0.0001|0.003|0.15"
     )
 fi
 
@@ -90,9 +94,13 @@ fi
 
 mkdir -p "$RUN_ROOT"
 
-if [[ ! -x "$SIM_BIN" ]]; then
-    echo "Building battleship-sim in $BUILD_DIR ..."
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+    echo "Ensuring battleship-sim is built in $BUILD_DIR ..."
     make -C "$BUILD_DIR" battleship-sim
+elif [[ ! -x "$SIM_BIN" ]]; then
+    echo "error: simulator not found or not executable: $SIM_BIN" >&2
+    echo "rerun without SKIP_BUILD=1 to build it automatically" >&2
+    exit 1
 fi
 
 printf 'run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,final_curriculum_stage,log_file,trainer_log\n' > "$SUMMARY_CSV"
@@ -232,7 +240,8 @@ run_one() {
 
     echo ""
     echo "== $run_id =="
-    echo "config: update_every=$update_every lr_policy=$lr_policy entropy=$entropy_coef near_boss=$near_boss seed=$seed"
+    echo "config: update_every=$update_every lr_policy=$lr_policy entropy=$entropy_coef near_boss=$near_boss boss_period=$BOSS_FIRE_PERIOD boss_lag=$BOSS_AIM_LAG seed=$seed"
+    echo "note: curriculum configs override boss_period/boss_lag by stage"
 
     "$PYTHON" battleship/train_battleship.py "$weights_dir" \
         --init \
@@ -271,7 +280,7 @@ run_one() {
     (
         set +e
         curriculum_flag=""
-        if [[ "$config_name" == "curriculum" ]] || [[ "${CURRICULUM:-0}" == "1" ]]; then
+        if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]]; then
             curriculum_flag="--curriculum"
         fi
         "$SIM_BIN" "$weights_dir" \
@@ -282,10 +291,14 @@ run_one() {
             --boss "$BOSS" \
             --sight "$SIGHT" \
             --fire "$FIRE" \
+            --boss-fire-period "$BOSS_FIRE_PERIOD" \
+            --boss-aim-lag "$BOSS_AIM_LAG" \
             --steps "$STEPS" \
             --survive "$SURVIVE" \
             --near-boss "$near_boss" \
             --proximity "$PROXIMITY" \
+            --hit-boss "$HIT_BOSS" \
+            --hit-self "$HIT_SELF" \
             --win-reward "$WIN_REWARD" \
             --log-dir "$log_dir" \
             $curriculum_flag &

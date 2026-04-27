@@ -101,6 +101,11 @@ def plot_log(path: Path, out_path: Path, window_arg: int, dpi: int) -> dict[str,
     zero_hit = (boss_hits == 0).astype(float)
     three_hit = (boss_hits >= 3).astype(float)
     mean_fire_dist = np.array([float(r.get("mean_fire_dist", np.nan)) for r in rows])
+    stages = np.array([int(r.get("curriculum_stage", -1)) for r in rows])
+    stage_changes = [
+        i for i in range(1, len(stages))
+        if stages[i] != stages[i - 1] and stages[i] >= 0
+    ]
 
     first0 = []
     for r in rows:
@@ -115,6 +120,8 @@ def plot_log(path: Path, out_path: Path, window_arg: int, dpi: int) -> dict[str,
     subtitle = (
         f"M={meta.get('M', '?')} agents={meta.get('n_agents', '?')} "
         f"boss={meta.get('n_boss', '?')} fire={meta.get('fire_range', '?')} "
+        f"boss_period={meta.get('boss_fire_period', '?')} "
+        f"boss_lag={meta.get('boss_aim_lag', '?')} "
         f"survive={meta.get('reward_survive', '?')} "
         f"near={meta.get('reward_near_boss', '?')} "
         f"win={meta.get('reward_agents_win', '?')}"
@@ -197,6 +204,8 @@ def plot_log(path: Path, out_path: Path, window_arg: int, dpi: int) -> dict[str,
     ax.legend(frameon=False, loc="center right")
 
     for ax in axes.ravel():
+        for idx in stage_changes:
+            ax.axvline(ep[idx], color="#777", lw=0.8, ls=":", alpha=0.35)
         ax.grid(True, alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -214,6 +223,8 @@ def plot_log(path: Path, out_path: Path, window_arg: int, dpi: int) -> dict[str,
         f"timeout {last_stats['timeout']:.1%}, "
         f"fire dist {last_stats['fire_dist']:.2f}"
     )
+    if np.any(stages >= 0):
+        summary += f", final stage {int(stages[-1])}"
     fig.text(0.5, 0.015, summary, ha="center", fontsize=10, color="#333")
 
     plt.tight_layout(rect=[0, 0.04, 1, 0.94])

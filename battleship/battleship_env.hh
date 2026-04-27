@@ -18,8 +18,9 @@
 //   action[1] → fire row offset  (continuous, clamped + rounded to fire_range)
 //   action[2] → fire col offset  (continuous, clamped + rounded to fire_range)
 //
-// Boss policy: fixed heuristic — fire on nearest in-range agent cell,
-//   move toward nearest visible agent (global vision).
+// Boss policy: fixed heuristic — move toward nearest visible agent, then fire on
+//   a predictable cadence. By default the shot is aimed at last-step agent cells
+//   so moving is a real dodge mechanic.
 //
 // Episode order per step: agents move → agents fire → bosses move → bosses fire.
 
@@ -42,6 +43,8 @@ struct BattleshipConfig {
     int   sight_range = 4;    // Chebyshev observation radius
     int   fire_range  = 3;    // Chebyshev firing radius (agents)
     int   boss_fire_range = 3; // Chebyshev firing radius (boss heuristic)
+    int   boss_fire_period = 8; // boss fires once every N boss turns
+    int   boss_aim_lag = 1;     // 0=current cells, >=1=previous-step cells
     int   max_steps   = 60;   // episode cap
     float reward_hit_boss   =  1.f;
     float reward_hit_self   = -1.f;
@@ -115,9 +118,14 @@ struct BattleshipEnv : Environment {
     const BattleshipConfig& config() const { return cfg_; }
 
     // Update curriculum parameters; takes effect on the next reset().
-    void set_curriculum(int boss_hp, float miss_prob) {
+    void set_curriculum(int boss_hp, float miss_prob,
+                        int fire_period = -1, int aim_lag = -1,
+                        int max_steps = -1) {
         cfg_.boss_start_hp  = boss_hp;
         cfg_.boss_miss_prob = miss_prob;
+        if (fire_period > 0) cfg_.boss_fire_period = fire_period;
+        if (aim_lag >= 0) cfg_.boss_aim_lag = aim_lag;
+        if (max_steps > 0) cfg_.max_steps = max_steps;
     }
 
     // ── Episode statistics (valid after is_done()) ──────────────────────────────
@@ -144,6 +152,8 @@ private:
     std::vector<Cell> grid_;    // M×M, row-major
     std::vector<Ship> agents_;
     std::vector<Ship> bosses_;
+    std::vector<std::array<std::array<int, 2>, 3>> prev_agent_cells_;
+    std::vector<std::array<bool, 3>> prev_agent_alive_;
 
     int   step_        = 0;
     bool  done_        = false;
@@ -173,6 +183,7 @@ private:
     void place_ships();
     bool try_place(Ship& s, bool is_boss);
     void move_ship(Ship& s, int dr, int dc);
+    void snapshot_agent_cells();
     bool fire_at(bool by_boss, int tr, int tc);   // true = hit
     int  nearest_live_boss_dist(int tr, int tc) const;
     float near_boss_reward(int tr, int tc) const;
