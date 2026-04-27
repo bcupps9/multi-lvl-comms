@@ -1,6 +1,0 @@
-{
-  "embed_dim": 64,
-  "action_dim": 3,
-  "obs_dim": 77,
-  "n_agents": 2
-}
