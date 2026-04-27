@@ -57,6 +57,10 @@ struct NeuralModels {
     // M(context_w): world model → (next_obs_all_agents_flat, reward)
     virtual std::pair<std::vector<float>, float>
     world_model(std::span<const float> context_w) = 0;
+
+    // Comm gate logit: σ(comm_gate(h)) = P(agent chooses to communicate).
+    // Default returns +inf so agents always communicate when no gate is loaded.
+    virtual float comm_gate(std::span<const float> /*h*/) { return 1e9f; }
 };
 
 
@@ -89,6 +93,12 @@ struct transition {
     float value     = 0.f;   // V estimate at t, used for GAE
     float log_prob  = 0.f;   // log π(a|context), used for PPO ratio
     float log_prob_old = 0.f;
+};
+
+struct CommGateDecision {
+    bool did_comm = false;
+    float gate_logit = 0.f;
+    std::vector<float> h;
 };
 
 
@@ -125,6 +135,35 @@ struct Agent {
     // Optional: filled by negotiation_phase each timestep so the harness can
     // compute per-step intention spread without re-running inference.
     std::vector<float>* own_intentions = nullptr;
+
+    // ── Experiment 1: World Model intention ordering ──────────────────────────
+    // When true, negotiation_phase broadcasts h, collects all neighbours' h, and
+    // runs a wm_H-step world-model rollout to produce the ordering signal.
+    bool  use_wm_intention = false;
+    int   wm_H             = 2;    // rollout horizon (paper default: H=2)
+
+    // Comms loss: per-step flag set by the harness before each negotiation call.
+    // When true, negotiation is skipped and ordering is random.
+    // The harness pre-computes one decision per timestep shared across all agents
+    // so they always agree on whether the channel failed.
+    const std::vector<bool>* comms_failed_per_step = nullptr;
+    float comms_loss_prob  = 0.f;  // kept for logging only; harness uses the vector
+
+    // Per-episode counters updated by negotiation_phase (harness owns storage).
+    int*  comms_ok_count    = nullptr;  // steps where ordering used real comms
+    int*  comms_total_count = nullptr;  // total negotiation steps attempted
+
+    // ── Experiment 2: Optional communication gate ─────────────────────────────
+    // When true, each agent independently samples a comm decision at the start
+    // of each negotiation step. If any agent opts out, ordering falls back to
+    // random. Agents that choose to comm incur comm_penalty in their reward.
+    bool  use_comm_gate      = false;
+    float comm_penalty       = 0.f;   // reward cost for choosing to communicate
+    bool  did_comm_this_step = false;  // set in negotiation, read in launching
+
+    // Per-step sidecar log for Python REINFORCE.
+    // Harness owns the vector; nullptr = no logging.
+    std::vector<CommGateDecision>* comm_log = nullptr;
 
     Agent(int id, int obs_dim, int action_dim,
           NeuralModels& models, Environment& env,

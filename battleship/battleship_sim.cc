@@ -191,6 +191,19 @@ struct CurriculumTracker {
     }
 };
 
+// ── Experiment configuration ────────────────────────────────────────────────────
+
+struct ExpConfig {
+    // Experiment 1: world-model intention ordering
+    bool  use_wm_intention  = false;
+    int   wm_H              = 2;     // rollout horizon
+    float comms_loss_prob   = 0.f;   // P(random ordering this step)
+
+    // Experiment 2: optional communication gate
+    bool  use_comm_gate     = false;
+    float comm_penalty      = 0.f;   // reward cost per comm step
+};
+
 // ── Episode stats struct ────────────────────────────────────────────────────────
 
 struct BsEpStats {
@@ -209,6 +222,10 @@ struct BsEpStats {
     std::array<int, 5> move_counts{};
     std::vector<int> fire_offset_counts;
     int   curriculum_stage   = -1;  // -1 = no curriculum
+    // Experiment stats
+    int   comms_ok           = 0;   // negotiation steps using real ordering
+    int   comms_total        = 0;   // total negotiation steps
+    float comm_rate          = 0.f; // fraction of steps where >=1 agent comm'd
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -265,7 +282,7 @@ static void wait_for(const fs::path& p) {
 // SeqComm: V(h_i) ordering + launching cascade every step.
 static cot::task<void> bs_seqcomm_task(Agent& agent, BattleshipEnv& env) {
     for (int t = 0; !env.is_done(); ++t) {
-        co_await agent.negotiation_phase(t, 2, 4);   // H, F params unused
+        co_await agent.negotiation_phase(t, 2, 2);   // F currently unused
         co_await agent.launching_phase(t);
     }
 }
@@ -295,12 +312,15 @@ struct CotamerResult {
     std::vector<transition> trajectory;
     std::vector<std::vector<float>> intention_log;  // [t][agent_i]
     std::vector<std::vector<int>>   ordering_log;   // [t][rank] = agent_id
+    // Experiment 2: per-agent per-step gate decisions for REINFORCE.
+    std::vector<std::vector<CommGateDecision>> comm_logs;
 };
 
 static CotamerResult run_cotamer_episode(BattleshipEnv& env,
                                           NeuralModels& models,
                                           random_source& rng,
-                                          Mode mode) {
+                                          Mode mode,
+                                          const ExpConfig& exp = {}) {
     CotamerResult out;
     auto& traj = out.trajectory;
 
@@ -317,6 +337,33 @@ static CotamerResult run_cotamer_episode(BattleshipEnv& env,
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < N; ++j)
             if (j != i) agents[i]->clique.push_back(j);
+
+    // Per-episode comms counters; one pair per agent (they'll all track the same
+    // negotiation steps but we average later).
+    std::vector<int> comms_ok_counts(N, 0), comms_total_counts(N, 0);
+    // Comm gate sidecar: per-agent per-step decisions for REINFORCE.
+    std::vector<std::vector<CommGateDecision>> comm_logs(N);
+
+    // Pre-compute per-step comms failure so all agents agree on the same outcome.
+    int max_t = env.config().max_steps;
+    std::vector<bool> comms_failed(max_t, false);
+    if (exp.comms_loss_prob > 0.f) {
+        for (int t = 0; t < max_t; ++t)
+            comms_failed[t] = (rng.uniform(0.f, 1.f) < exp.comms_loss_prob);
+    }
+
+    for (int i = 0; i < N; ++i) {
+        auto& a = *agents[i];
+        a.use_wm_intention       = exp.use_wm_intention;
+        a.wm_H                   = exp.wm_H;
+        a.comms_loss_prob        = exp.comms_loss_prob;
+        a.comms_failed_per_step  = &comms_failed;
+        a.comms_ok_count         = &comms_ok_counts[i];
+        a.comms_total_count      = &comms_total_counts[i];
+        a.use_comm_gate          = exp.use_comm_gate;
+        a.comm_penalty           = exp.comm_penalty;
+        if (exp.use_comm_gate) a.comm_log = &comm_logs[i];
+    }
 
     std::list<netsim::channel<pancy::agent_msg>> channels;
     for (int i = 0; i < N; ++i)
@@ -404,6 +451,23 @@ static CotamerResult run_cotamer_episode(BattleshipEnv& env,
         s.mean_intention_spread = (float)(sum / T);
     }
 
+    // Comms stats: average across agents (should be identical in seqcomm).
+    {
+        int ok_sum = 0, tot_sum = 0;
+        for (int i = 0; i < N; ++i) {
+            ok_sum  += comms_ok_counts[i];
+            tot_sum += comms_total_counts[i];
+        }
+        s.comms_ok    = ok_sum / std::max(1, N);
+        s.comms_total = tot_sum / std::max(1, N);
+        s.comm_rate   = s.comms_total > 0
+            ? static_cast<float>(s.comms_ok) / static_cast<float>(s.comms_total)
+            : 1.f;
+    }
+
+    // Comm gate sidecar: stash it on out so the main loop can write it to disk.
+    out.comm_logs = std::move(comm_logs);
+
     return out;
 }
 
@@ -472,10 +536,16 @@ static BsEpStats run_sync_episode(BattleshipEnv& env, NeuralModels& models,
 // ── Logging ─────────────────────────────────────────────────────────────────────
 
 static void write_meta(std::ofstream& f, Mode mode,
-                       const BattleshipConfig& cfg, int n_ep) {
+                       const BattleshipConfig& cfg, int n_ep,
+                       const ExpConfig& exp = {}) {
     f << "{\"_meta\": {"
       << "\"env\": \"battleship\", "
       << "\"mode\": \"" << mode_str(mode) << "\", "
+      << "\"use_wm_intention\": " << (exp.use_wm_intention ? "true" : "false") << ", "
+      << "\"wm_H\": " << exp.wm_H << ", "
+      << "\"comms_loss_prob\": " << jn(exp.comms_loss_prob) << ", "
+      << "\"use_comm_gate\": " << (exp.use_comm_gate ? "true" : "false") << ", "
+      << "\"comm_penalty\": " << jn(exp.comm_penalty) << ", "
       << "\"M\": " << cfg.M << ", "
       << "\"n_agents\": " << cfg.n_agents << ", "
       << "\"n_boss\": " << cfg.n_boss << ", "
@@ -527,11 +597,48 @@ static void write_ep_log(std::ofstream& f, int ep, const BsEpStats& s) {
     f << "]";
     if (s.curriculum_stage >= 0)
         f << ", \"curriculum_stage\": " << s.curriculum_stage;
-    f << "}\n";
+    f << ", \"comms_ok\": " << s.comms_ok
+      << ", \"comms_total\": " << s.comms_total
+      << ", \"comm_rate\": " << jn(s.comm_rate)
+      << "}\n";
     f.flush();
 }
 
 // ── main ────────────────────────────────────────────────────────────────────────
+
+// ── Comm gate sidecar writer ────────────────────────────────────────────────────
+// Binary format:
+//   MAGIC    : uint32  (0x43474154 = "CGAT")
+//   n_entries: int32   — sum of per-agent comm decisions across all agents × steps
+//   embed_dim: int32
+//   ep_reward: float32
+//   [n_entries × (did_comm:int32, gate_logit:float32, h[embed_dim]:float32)]
+//
+// Only agent 0's decisions are written (symmetry assumption for paper experiments).
+
+static void write_comm_sidecar(const fs::path& path,
+                                const std::vector<CommGateDecision>& log,
+                                float ep_reward)
+{
+    constexpr uint32_t MAGIC = 0x43474154u;
+    int n   = static_cast<int>(log.size());
+    int edim = log.empty() ? 0 : static_cast<int>(log.front().h.size());
+
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(&MAGIC),     4);
+    f.write(reinterpret_cast<const char*>(&n),         4);
+    f.write(reinterpret_cast<const char*>(&edim),      4);
+    f.write(reinterpret_cast<const char*>(&ep_reward), 4);
+
+    std::vector<float> zero_h(edim, 0.f);
+    for (const auto& rec : log) {
+        int dc = static_cast<int>(rec.did_comm);
+        f.write(reinterpret_cast<const char*>(&dc),    4);
+        f.write(reinterpret_cast<const char*>(&rec.gate_logit), 4);
+        const auto& h = static_cast<int>(rec.h.size()) == edim ? rec.h : zero_h;
+        f.write(reinterpret_cast<const char*>(h.data()), edim * 4);
+    }
+}
 
 int main(int argc, char* argv[]) {
     std::string      weights_dir;
@@ -542,6 +649,7 @@ int main(int argc, char* argv[]) {
     std::string      log_dir_str;
     bool             use_curriculum = false;
     BattleshipConfig bcfg;
+    ExpConfig        exp_cfg;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -569,6 +677,13 @@ int main(int argc, char* argv[]) {
         else if (arg == "--no-survive")            bcfg.reward_survive   = 0.f;
         else if (arg == "--no-near-boss")          bcfg.reward_near_boss  = 0.f;
         else if (arg == "--no-proximity")          bcfg.reward_proximity  = 0.f;
+        // Experiment 1: world-model intention
+        else if (arg == "--wm-intention")          exp_cfg.use_wm_intention = true;
+        else if (arg == "--wm-H" && i+1<argc)      exp_cfg.wm_H = std::stoi(argv[++i]);
+        else if (arg == "--comms-loss" && i+1<argc) exp_cfg.comms_loss_prob = std::stof(argv[++i]);
+        // Experiment 2: comm gate
+        else if (arg == "--comm-gate")             exp_cfg.use_comm_gate = true;
+        else if (arg == "--comm-penalty" && i+1<argc) exp_cfg.comm_penalty = std::stof(argv[++i]);
         else if (arg[0] != '-')                   weights_dir = arg;
         else {
             std::print(stderr,
@@ -579,7 +694,9 @@ int main(int argc, char* argv[]) {
                 "  [--boss-fire N] [--boss-fire-period N] [--boss-aim-lag N]\n"
                 "  [--survive R] [--near-boss R] [--proximity R] [--win-reward R]\n"
                 "  [--hit-boss R] [--hit-self R]\n"
-                "  [--no-survive] [--no-near-boss] [--no-proximity]\n");
+                "  [--no-survive] [--no-near-boss] [--no-proximity]\n"
+                "  Exp1: [--wm-intention] [--wm-H N] [--comms-loss P]\n"
+                "  Exp2: [--comm-gate] [--comm-penalty R]\n");
             return 1;
         }
     }
@@ -641,7 +758,7 @@ int main(int argc, char* argv[]) {
     std::string ts = now_ts();
     fs::path log_path = log_dir / (mode_str(mode) + "_" + ts + ".jsonl");
     std::ofstream log_file(log_path);
-    write_meta(log_file, mode, bcfg, n_ep);
+    write_meta(log_file, mode, bcfg, n_ep, exp_cfg);
 
     std::print("battleship-sim  mode={}  M={}  agents={}  boss={}  sight={}  fire={}  "
                "boss_period={}  boss_lag={}  steps={}  survive={}  near_boss={}  "
@@ -687,11 +804,20 @@ int main(int argc, char* argv[]) {
                 mappo_batch.clear();
             }
         } else {
-            auto res = run_cotamer_episode(env, *models, rng, mode);
+            auto res = run_cotamer_episode(env, *models, rng, mode, exp_cfg);
             stats    = res.stats;
             if (do_train && !res.trajectory.empty()) {
                 write_trajectory(traj_bin.string(), res.trajectory,
                                  bcfg.n_agents, env.obs_dim(), env.action_dim());
+
+                // Write comm gate sidecar for Experiment 2 REINFORCE update.
+                if (exp_cfg.use_comm_gate && !res.comm_logs.empty()
+                        && !res.comm_logs[0].empty()) {
+                    fs::path sidecar = fs::path(weights_dir) / "comm_gate_sidecar.bin";
+                    write_comm_sidecar(sidecar, res.comm_logs[0],
+                                       stats.total_reward);
+                }
+
                 touch(traj_ready);
                 std::print("  ep {:4d}  waiting for Python…\n", ep);
                 wait_for(wts_ready);
@@ -733,12 +859,15 @@ int main(int argc, char* argv[]) {
         fm += "]";
         std::string cur_tag = use_curriculum
             ? std::format("  c{}", curriculum.stage) : "";
+        std::string comm_tag = "";
+        if (exp_cfg.use_wm_intention || exp_cfg.use_comm_gate || exp_cfg.comms_loss_prob > 0)
+            comm_tag = std::format("  cr={:.0f}%", stats.comm_rate * 100.f);
         std::print("ep {:4d}  r={:+.2f}  steps={:3d}  boss_hits={:2d}  "
-                   "agent_hits={:2d}  {}  fm={}{}\n",
+                   "agent_hits={:2d}  {}  fm={}{}{}\n",
                    ep, stats.total_reward, stats.steps,
                    stats.boss_hits, stats.agent_hits,
                    stats.agents_won ? "WIN" : stats.boss_won ? "LOSS" : "time",
-                   fm, cur_tag);
+                   fm, cur_tag, comm_tag);
     }
 
     std::print("\navg reward: {:.3f}\n", reward_sum / n_ep);

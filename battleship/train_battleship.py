@@ -222,6 +222,100 @@ class Critic(nn.Module):
         return self.net(context).squeeze(-1)
 
 
+class CommGate(nn.Module):
+    """
+    Experiment 2 comm gate: h → scalar logit.
+
+    σ(logit) = P(agent chooses to communicate this step).
+    Trained via REINFORCE using per-episode return as signal.
+    Saved as comm_gate.pt alongside the main TorchScript files.
+    """
+
+    def __init__(self, embed_dim: int):
+        super().__init__()
+        self.net = nn.Linear(embed_dim, 1)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.net(h).squeeze(-1)  # scalar logit
+
+
+# ── Comm gate sidecar I/O (Experiment 2) ─────────────────────────────────────
+
+COMM_GATE_MAGIC = 0x43474154  # "CGAT"
+
+def read_comm_gate_sidecar(path: str):
+    """
+    Read comm_gate_sidecar.bin written by battleship_sim.cc.
+
+    Returns (decisions, ep_reward) where decisions is a list of
+    {'did_comm': bool, 'gate_logit': float} dicts (one per negotiation step).
+    """
+    with open(path, 'rb') as f:
+        magic, n, embed_dim = struct.unpack('<3I', f.read(12))
+        if magic != COMM_GATE_MAGIC:
+            raise ValueError(f'Bad comm_gate_sidecar magic: {magic:#x}')
+        ep_reward = struct.unpack('<f', f.read(4))[0]
+        decisions = []
+        for _ in range(n):
+            did_comm, logit = struct.unpack('<if', f.read(8))
+            h_bytes = f.read(embed_dim * 4)
+            h = list(struct.unpack(f'<{embed_dim}f', h_bytes)) if embed_dim else None
+            decisions.append({'did_comm': bool(did_comm),
+                              'gate_logit': logit,
+                              'h': h})
+    return decisions, ep_reward
+
+
+def update_comm_gate(comm_gate: 'CommGate', opt_comm, decisions: list,
+                     ep_reward: float, comm_penalty: float,
+                     reward_baseline: float = 0.0) -> dict:
+    """
+    REINFORCE update for the comm gate.
+
+    Signal for each step:
+        did_comm  → net reward = ep_reward - comm_penalty * n_comm_steps - baseline
+        no-comm   → net reward = ep_reward - baseline
+
+    This encourages the gate to comm only when the expected ordering benefit
+    exceeds the penalty.
+    """
+    if not decisions:
+        return {}
+
+    n_comm = sum(1 for d in decisions if d['did_comm'])
+    ep_net = ep_reward - comm_penalty * n_comm - reward_baseline
+
+    # Re-run the Python CommGate forward pass so grad_fn exists.  The sidecar
+    # stores the C++ hidden states but not their autograd history, so this is
+    # the point where gradients reconnect to the gate parameters.
+    n_steps = len(decisions)
+    param = next(comm_gate.parameters())
+    h_rows = [d.get('h') for d in decisions]
+    if all(h is not None and len(h) == EMBED_DIM for h in h_rows):
+        h_t = torch.tensor(h_rows, dtype=param.dtype, device=param.device)
+    else:
+        h_t = torch.zeros(n_steps, EMBED_DIM, dtype=param.dtype, device=param.device)
+    logits = comm_gate(h_t)                          # (n_steps,) with grad_fn
+
+    did_comm_t = torch.tensor([float(d['did_comm']) for d in decisions],
+                               dtype=param.dtype, device=param.device)
+
+    dist = torch.distributions.Bernoulli(logits=logits)
+    log_probs = dist.log_prob(did_comm_t)
+
+    loss = -(log_probs * ep_net).mean()
+    opt_comm.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(comm_gate.parameters(), 1.0)
+    opt_comm.step()
+
+    return {
+        'comm_gate_loss':  loss.item(),
+        'comm_rate':       n_comm / max(1, len(decisions)),
+        'ep_net_reward':   ep_net,
+    }
+
+
 # ── Weight I/O ────────────────────────────────────────────────────────────────
 
 # Must match the order read by LibtorchNeuralModels::update_from_blob() in C++.
@@ -240,6 +334,8 @@ def save_torchscript(nets: dict, weights_dir: str, obs_dim: int, n_agents: int) 
     torch.jit.script(ScriptablePolicy(nets['policy'])).save(
         os.path.join(weights_dir, 'policy.pt'))
     torch.jit.script(nets['critic']).save(os.path.join(weights_dir, 'critic.pt'))
+    if 'comm_gate' in nets:
+        torch.jit.script(nets['comm_gate']).save(os.path.join(weights_dir, 'comm_gate.pt'))
 
     cfg = {
         'embed_dim': EMBED_DIM,
@@ -584,8 +680,8 @@ def update_episode(transitions, n_agents, nets,
 
 # ── Module factory ────────────────────────────────────────────────────────────
 
-def make_nets(obs_dim: int, n_agents: int) -> dict:
-    return {
+def make_nets(obs_dim: int, n_agents: int, use_comm_gate: bool = False) -> dict:
+    nets = {
         'encoder':     Encoder(obs_dim, EMBED_DIM),
         'attn_a':      AttentionModule(EMBED_DIM, ACTION_DIM),
         'attn_w':      AttentionModule(EMBED_DIM, EMBED_DIM + ACTION_DIM),
@@ -593,6 +689,9 @@ def make_nets(obs_dim: int, n_agents: int) -> dict:
         'policy':      Policy(EMBED_DIM, ACTION_DIM),
         'critic':      Critic(EMBED_DIM),
     }
+    if use_comm_gate:
+        nets['comm_gate'] = CommGate(EMBED_DIM)
+    return nets
 
 
 def make_optimizers(nets: dict,
@@ -611,7 +710,10 @@ def make_optimizers(nets: dict,
         list(nets['critic'].parameters()),
         lr=lr_policy,
     )
-    return opt_enc, opt_world, opt_pol
+    opt_comm = None
+    if 'comm_gate' in nets:
+        opt_comm = optim.Adam(nets['comm_gate'].parameters(), lr=lr_policy)
+    return opt_enc, opt_world, opt_pol, opt_comm
 
 
 def load_from_scripts(nets: dict, weights_dir: str) -> None:
@@ -713,6 +815,12 @@ def write_trainer_update(f, update_idx: int, ep: int, batch_size: int,
         'pmean_std':           losses.get('pmean_std', 0.0),
         'elapsed_sec':         elapsed,
     }
+    if 'comm_gate_loss' in losses:
+        row.update({
+            'comm_gate_loss': losses['comm_gate_loss'],
+            'comm_gate_rate': losses.get('comm_rate', 0.0),
+            'comm_gate_net_reward': losses.get('ep_net_reward', 0.0),
+        })
     f.write(json.dumps(row) + '\n')
     f.flush()
 
@@ -738,6 +846,11 @@ def main():
     parser.add_argument('--lr-policy', type=float, default=LR_POL)
     parser.add_argument('--trainer-log',
                         help='Optional JSONL file for Python update diagnostics')
+    # Experiment 2: comm gate
+    parser.add_argument('--comm-gate', action='store_true',
+                        help='Enable optional comm gate (Experiment 2)')
+    parser.add_argument('--comm-penalty', type=float, default=0.0,
+                        help='Reward cost for communicating (Experiment 2)')
     args = parser.parse_args()
 
     weights_dir = args.weights_dir
@@ -745,18 +858,23 @@ def main():
     n_agents    = args.n_agents
     update_every = max(1, args.update_every)
 
-    nets = make_nets(obs_dim, n_agents)
+    use_comm_gate = args.comm_gate
+    comm_penalty  = args.comm_penalty
+
+    nets = make_nets(obs_dim, n_agents, use_comm_gate=use_comm_gate)
 
     if args.init:
         os.makedirs(weights_dir, exist_ok=True)
         save_torchscript(nets, weights_dir, obs_dim, n_agents)
         save_weights_bin(nets, weights_dir)
         print('Initial weights written. Start the C++ sim now.')
+        if use_comm_gate:
+            print('  comm_gate.pt included (Experiment 2 mode).')
         return
 
     # Warm-start if weights already exist
     load_from_scripts(nets, weights_dir)
-    opt_enc, opt_world, opt_pol = make_optimizers(
+    opt_enc, opt_world, opt_pol, opt_comm = make_optimizers(
         nets,
         lr_enc=args.lr_enc,
         lr_world=args.lr_world,
@@ -791,6 +909,11 @@ def main():
     last_losses = {'wm': float('nan'), 'value': float('nan'),
                    'policy': float('nan'), 'entropy': float('nan')}
 
+    # Comm gate sidecar accumulator (Experiment 2)
+    comm_sidecar_path  = os.path.join(weights_dir, 'comm_gate_sidecar.bin')
+    comm_sidecar_batch: list[tuple] = []   # [(decisions, ep_reward)]
+    comm_reward_hist: list[float] = []     # running baseline for REINFORCE
+
     while True:
         while not os.path.exists(traj_ready):
             if os.path.exists(traj_done):
@@ -801,6 +924,17 @@ def main():
                                           opt_enc, opt_world, opt_pol,
                                           entropy_coef=args.entropy_coef,
                                           grad_clip=args.grad_clip)
+                    if use_comm_gate and opt_comm is not None and comm_sidecar_batch:
+                        baseline = (sum(comm_reward_hist[-50:]) / max(1, len(comm_reward_hist[-50:])))
+                        cg_stats = {}
+                        for decisions, ep_rew in comm_sidecar_batch:
+                            cg_stats = update_comm_gate(nets['comm_gate'], opt_comm, decisions,
+                                                        ep_rew, comm_penalty, baseline)
+                        if cg_stats:
+                            losses.update(cg_stats)
+                        comm_sidecar_batch.clear()
+                        torch.jit.script(nets['comm_gate']).save(
+                            os.path.join(weights_dir, 'comm_gate.pt'))
                     save_weights_bin(nets, weights_dir)
                     write_trainer_update(
                         trainer_log, update_idx, ep - 1, batch_size,
@@ -832,6 +966,19 @@ def main():
             open(wts_ready, 'w').close()
             continue
 
+        # Read comm gate sidecar (Experiment 2) — written alongside traj.bin.
+        if use_comm_gate and os.path.exists(comm_sidecar_path):
+            try:
+                decisions, sidecar_reward = read_comm_gate_sidecar(comm_sidecar_path)
+                comm_sidecar_batch.append((decisions, sidecar_reward))
+                comm_reward_hist.append(sidecar_reward)
+            except Exception as e:
+                print(f'  warn: could not read comm_gate_sidecar: {e}')
+            try:
+                os.remove(comm_sidecar_path)
+            except OSError:
+                pass
+
         batch.append(transitions)
         did_update = len(batch) >= update_every
         if did_update:
@@ -841,6 +988,21 @@ def main():
                                        entropy_coef=args.entropy_coef,
                                        grad_clip=args.grad_clip)
             batch.clear()
+
+            # Comm gate REINFORCE update (Experiment 2).
+            if use_comm_gate and opt_comm is not None and comm_sidecar_batch:
+                baseline = (sum(comm_reward_hist[-50:]) / max(1, len(comm_reward_hist[-50:])))
+                cg_stats = {}
+                for decisions, ep_rew in comm_sidecar_batch:
+                    cg_stats = update_comm_gate(
+                        nets['comm_gate'], opt_comm, decisions,
+                        ep_rew, comm_penalty, baseline)
+                comm_sidecar_batch.clear()
+                # Persist updated comm gate for C++ to reload next episode.
+                torch.jit.script(nets['comm_gate']).save(
+                    os.path.join(weights_dir, 'comm_gate.pt'))
+                if cg_stats:
+                    last_losses.update(cg_stats)
 
         ep_reward = sum(tr['reward'] for tr in transitions if tr['agent_id'] == 0)
         reward_hist.append(ep_reward)

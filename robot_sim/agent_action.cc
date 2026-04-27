@@ -36,40 +36,161 @@ cot::task<void> Agent::broadcast(pancy::agent_msg msg) {
 
 // ── negotiation_phase ─────────────────────────────────────────────────────────
 //
-//   Encode obs → h_i, compute intention as V(h_i) (critic value with no
-//   upper context), broadcast scalar intention, receive all, set N_upper/N_lower.
+// Encode obs → h_i, compute ordering intention, broadcast, receive, set
+// N_upper/N_lower.  Three modes:
 //
-//   Deliberately shares only the scalar intention — NOT h_i — so the cascade
-//   remains the only inter-agent information channel at execution time.
-//   H_bar can only be inferred from bet sizes, keeping the coordination
-//   problem non-trivial.
+//   use_wm_intention=false  (default)
+//       Critic proxy: V(AM_a(h_i, {})).  Single-round broadcast of a scalar.
 //
-//   Tie-breaking by agent ID ensures a total order even with untrained
-//   (near-uniform) critics, preventing execute_signal deadlock.
+//   use_wm_intention=true   (Experiment 1)
+//       H-step world-model rollout.  First broadcasts h_i (hidden_state_msg)
+//       so every agent has all h_j for a LOCAL rollout, then broadcasts the
+//       resulting cumulative predicted reward as the intention scalar.
+//       Two cotamer rounds per negotiation step.
+//
+//   comms_loss_prob > 0     (Experiment 1 ablation)
+//       With probability comms_loss_prob, skip negotiation entirely and assign
+//       random N_upper / N_lower.  Simulates channel failure.
+//
+//   use_comm_gate=true      (Experiment 2)
+//       Each agent independently samples do_comm ~ Bernoulli(σ(gate(h))).
+//       If any agent opts out it broadcasts a sentinel (-1e30) rather than its
+//       real intention; receivers detect this and fall back to random ordering.
+//       Agents that chose to comm will have their reward reduced by comm_penalty
+//       in launching_phase.
+//
+// Tie-breaking by agent ID guarantees a strict total order even with identical
+// intentions, preventing execute_signal deadlock.
 
-cot::task<void> Agent::negotiation_phase(int t, int /*H*/, int /*F*/) {
+cot::task<void> Agent::negotiation_phase(int t, int H, int /*F*/) {
     h = models.encode(obs);
 
-    // Intention proxy: critic value at own state with no upper context.
-    // High H_i → high expected return → high V → correct ordering signal.
-    auto ctx      = models.attention_a(h, {});
-    float intention = models.critic(ctx);
+    // ── Comms-loss: random ordering, skip all negotiation ─────────────────────
+    // Decision is pre-computed by the harness and shared across ALL agents for
+    // this timestep — avoids deadlock from independent per-agent dice rolls.
+    bool channel_failed = comms_failed_per_step &&
+                          t < (int)comms_failed_per_step->size() &&
+                          (*comms_failed_per_step)[t];
+    if (channel_failed) {
+        // Fallback ordering: lower agent ID acts first (consistent across all
+        // agents with no message passing — avoids launching_phase deadlock).
+        N_upper.clear();
+        N_lower.clear();
+        for (int nid : clique) {
+            if (nid < id) N_upper.push_back(nid);
+            else           N_lower.push_back(nid);
+        }
+        if (comms_total_count) ++(*comms_total_count);
+        co_return;
+    }
+
+    // ── Comm gate: each agent independently decides whether to communicate ────
+    bool do_comm    = true;
+    float comm_logit = 1e9f;
+    if (use_comm_gate) {
+        comm_logit = models.comm_gate(h);
+        float p = 1.f / (1.f + std::exp(-comm_logit));
+        do_comm = (rng_.uniform(0.f, 1.f) < p);
+        did_comm_this_step = do_comm;
+        if (comm_log) comm_log->push_back({do_comm, comm_logit, h});
+    }
+
+    // ── Compute ordering intention ─────────────────────────────────────────────
+    float intention = 0.f;
+
+    if (use_wm_intention && !clique.empty()) {
+        // Round 1: ALL agents broadcast h unconditionally — including agents that
+        // later opt out via the comm gate.  This prevents deadlock when do_comm
+        // differs across agents: everyone participates in round 1, the comm
+        // decision only affects what is sent in round 2 (intention vs sentinel).
+        co_await broadcast(pancy::hidden_state_msg{id, h});
+
+        std::vector<std::vector<float>> all_h;
+        all_h.reserve(1 + clique.size());
+        all_h.push_back(h);
+        for (size_t k = 0; k < clique.size(); ++k) {
+            auto msg = co_await receive_typed<pancy::hidden_state_msg>();
+            all_h.push_back(msg.h);
+        }
+
+        // Only run the expensive rollout if this agent is going to comm.
+        // If opting out we still need to reach the intention_msg broadcast below
+        // (as a sentinel), so fall back to a cheap critic call.
+        if (do_comm) {
+            auto cur_h = all_h;
+            float total_pred = 0.f;
+            const int N = static_cast<int>(cur_h.size());
+            const int rollout = (H > 0) ? H : wm_H;
+            for (int s = 0; s < rollout; ++s) {
+                std::vector<std::vector<float>> tent_a;
+                tent_a.reserve(N);
+                for (auto& hj : cur_h) {
+                    auto ctx_j      = models.attention_a(hj, {});
+                    auto [a_j, _lp] = models.policy_sample(ctx_j);
+                    tent_a.push_back(std::move(a_j));
+                }
+                auto ctx_w          = models.attention_w(cur_h, tent_a);
+                auto [nobs_flat, r] = models.world_model(ctx_w);
+                total_pred += r;
+                if (s < rollout - 1) {
+                    int od = static_cast<int>(nobs_flat.size()) / N;
+                    for (int j = 0; j < N; ++j)
+                        cur_h[j] = models.encode(
+                            std::span<const float>{nobs_flat.data() + j * od,
+                                                   static_cast<size_t>(od)});
+                }
+            }
+            intention = total_pred;
+        } else {
+            auto ctx  = models.attention_a(h, {});
+            intention = models.critic(ctx);
+        }
+    } else {
+        // Critic proxy: V(AM_a(h, {})) — fast single forward pass.
+        auto ctx  = models.attention_a(h, {});
+        intention = models.critic(ctx);
+    }
+
     if (own_intentions) own_intentions->push_back(intention);
 
-    co_await broadcast(pancy::intention_msg{id, intention});
+    // ── Broadcast intention (sentinel when agent opts out of comm gate) ────────
+    // Sentinel: a value so large-negative that no real critic/WM score reaches it.
+    constexpr float NO_COMM_SENTINEL = -1e30f;
+    co_await broadcast(pancy::intention_msg{
+        id, do_comm ? intention : NO_COMM_SENTINEL});
 
+    // ── Collect neighbours' intentions and set N_upper / N_lower ─────────────
     N_upper.clear();
     N_lower.clear();
+    bool any_no_comm = !do_comm;
+    std::vector<std::pair<int, float>> received;
+    received.reserve(clique.size());
+
     for (size_t k = 0; k < clique.size(); ++k) {
         auto msg = co_await receive_typed<pancy::intention_msg>();
-        // Tiebreak by agent ID → guaranteed total order even with identical
-        // intentions (e.g. untrained models), preventing deadlock.
-        bool is_upper = msg.intention > intention ||
-            (msg.intention == intention && msg.sender_id > id);
-        if (is_upper)
-            N_upper.push_back(msg.sender_id);
-        else
-            N_lower.push_back(msg.sender_id);
+        if (msg.intention <= NO_COMM_SENTINEL + 1e20f) any_no_comm = true;
+        received.emplace_back(msg.sender_id, msg.intention);
+    }
+
+    if (comms_total_count) ++(*comms_total_count);
+
+    if (any_no_comm) {
+        // At least one agent opted out → fixed ordering by agent ID.
+        // Must be deterministic and consistent across all agents so launching_phase
+        // doesn't deadlock (each agent uses the same rule independently).
+        for (auto [rid, _] : received) {
+            if (rid < id) N_upper.push_back(rid);
+            else           N_lower.push_back(rid);
+        }
+    } else {
+        // All agents communicated — use real ordering.
+        if (comms_ok_count) ++(*comms_ok_count);
+        for (auto [rid, rint] : received) {
+            bool is_upper = rint > intention ||
+                (rint == intention && rid > id);
+            if (is_upper) N_upper.push_back(rid);
+            else           N_lower.push_back(rid);
+        }
     }
 
     if (verbose) {
@@ -121,6 +242,14 @@ cot::task<void> Agent::launching_phase(int t) {
     env.submit_action(id, action);
     auto [next_obs, reward] = co_await env.get_result(id);
 
+    // Comm gate: communicating has a cost.  Subtract penalty here so the PPO
+    // gradient sees the true net reward and learns to trade off ordering
+    // quality against communication overhead.
+    float net_reward = reward;
+    if (comm_penalty > 0.f && did_comm_this_step) {
+        net_reward -= comm_penalty;
+    }
+
     // Record transition
     trajectory.push_back({
         .agent_id    = id,
@@ -129,7 +258,7 @@ cot::task<void> Agent::launching_phase(int t) {
         .action      = action,
         .upper_actions = a_upper,
         .next_obs    = next_obs,
-        .reward      = reward,
+        .reward      = net_reward,
         .value       = v,
         .log_prob    = log_p,
         .log_prob_old = log_p_old,

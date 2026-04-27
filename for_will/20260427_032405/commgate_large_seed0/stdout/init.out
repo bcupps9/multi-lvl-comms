@@ -1,0 +1,3 @@
+TorchScript weights saved → /Users/bobbycupps/Downloads/work/multi-lvl-comms/runs/battleship_grid/20260427_032405/commgate_large_seed0/weights
+Initial weights written. Start the C++ sim now.
+  comm_gate.pt included (Experiment 2 mode).

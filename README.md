@@ -606,6 +606,140 @@ launching, trajectory recording) is environment-agnostic.
 
 
 Think about what is so slow:
-It's bad to be writing out for every trajectory step and have two processes coordinating. 
+It's bad to be writing out for every trajectory step and have two processes coordinating.
+
+---
+
+## Battleship paper experiments
+
+The `battleship/` subdirectory contains a fully trained collaborative battleship
+environment (N agent ships vs boss ships on an 8×8 grid) used for the two paper
+experiments below.  Both experiments compare variants of the SeqComm ordering
+protocol and require the C++ ↔ Python training loop described above.
+
+### Building the battleship simulator
+
+```bash
+make -C build-local battleship-sim
+# or, if starting fresh:
+cmake -B build-local -DUSE_TORCH=ON \
+  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
+cmake --build build-local --target battleship-sim
+```
+
+### Experiment 1 — World-Model Intention Ordering vs Comms Loss
+
+**Research question:** Does using the real world-model rollout (H=2) to compute the
+ordering signal improve coordination, and how much does random communication loss
+degrade that benefit?
+
+**What was changed:**
+
+| File | Change |
+|------|--------|
+| `robot_sim/agent_action.hh` | Added `use_wm_intention`, `wm_H`, `comms_loss_prob` fields to Agent |
+| `robot_sim/agent_action.cc` | `negotiation_phase()`: when `use_wm_intention=true`, broadcasts `hidden_state_msg` (round 1), collects all h_j, runs H-step world-model rollout locally, uses cumulative predicted reward as intention signal; when `comms_loss_prob > 0`, skips negotiation with that probability and falls back to random ordering |
+| `battleship/battleship_sim.cc` | CLI flags `--wm-intention`, `--wm-H N`, `--comms-loss P`; logs `comms_ok`, `comms_total`, `comm_rate` per episode |
+
+**Variants run (5 configs × 3 seeds = 15 runs):**
+
+| Config | Ordering signal | Comms loss |
+|--------|----------------|------------|
+| `baseline_critic` | V(h_i) critic proxy | 0% |
+| `wm_loss00` | H=2 WM rollout | 0% |
+| `wm_loss10` | H=2 WM rollout | 10% |
+| `wm_loss20` | H=2 WM rollout | 20% |
+| `wm_loss30` | H=2 WM rollout | 30% |
+
+**How to run:**
+
+```bash
+# Full grid (5 configs × 3 seeds, sequential)
+EXP=exp1 EPISODES=5000 SEEDS="0 1 2" bash battleship/run_battleship_grid.sh
+
+# Single variant for quick check
+SINGLE_CONFIG="wm_loss10|16|0.0003|0.003|0.15" \
+  EPISODES=3000 SEEDS="0" bash battleship/run_battleship_grid.sh
+```
+
+Results land in `runs/battleship_grid/<timestamp>/summary.csv`.  Key columns:
+`last500_win` (win rate), `last500_comm_rate` (fraction of steps with successful ordering).
+
+---
+
+### Experiment 2 — Optional Communication Gate
+
+**Research question:** If agents can choose NOT to communicate (and communication costs
+a small reward penalty), do they learn to stop communicating as the penalty grows?
+
+**What was changed:**
+
+| File | Change |
+|------|--------|
+| `robot_sim/agent_action.hh` | Added `use_comm_gate`, `comm_penalty`, `did_comm_this_step`, `comm_log` fields |
+| `robot_sim/agent_action.cc` | `negotiation_phase()`: when `use_comm_gate=true`, each agent independently samples `do_comm ~ Bernoulli(σ(gate(h)))` and broadcasts a sentinel if opting out; any sentinel detected → random ordering for that step. `launching_phase()`: subtracts `comm_penalty` from reward when `did_comm_this_step=true` |
+| `robot_sim/libtorch_models.hh` | Loads optional `comm_gate.pt`; `comm_gate(h)` returns logit; updated each episode from disk |
+| `battleship/battleship_sim.cc` | CLI flags `--comm-gate`, `--comm-penalty R`; writes `comm_gate_sidecar.bin` (per-step comm decisions) alongside `traj.bin` |
+| `battleship/train_battleship.py` | `CommGate(embed_dim→1)` module; `read_comm_gate_sidecar()`; `update_comm_gate()` REINFORCE update using episode reward minus penalty cost; saves `comm_gate.pt` after each batch |
+
+**Variants run (3 configs × 3 seeds = 9 runs):**
+
+| Config | Comm penalty | Expected behaviour |
+|--------|-------------|-------------------|
+| `commgate_tiny` | 0.005 | agents comm almost always (benefit > cost) |
+| `commgate_medium` | 0.050 | mixed — comm rate drops as policy converges |
+| `commgate_large` | 0.500 | agents learn to stop communicating |
+
+All three variants also use `--wm-intention` so ordering quality (when agents DO comm)
+matches Experiment 1's WM condition.
+
+**How to run:**
+
+```bash
+# Full grid (3 configs × 3 seeds)
+EXP=exp2 EPISODES=5000 SEEDS="0 1 2" bash battleship/run_battleship_grid.sh
+
+# Single variant
+SINGLE_CONFIG="commgate_medium|16|0.0003|0.003|0.15" \
+  EXP=exp2 EPISODES=3000 SEEDS="0" bash battleship/run_battleship_grid.sh
+```
+
+Key result column in `summary.csv`: `last500_comm_rate` — the fraction of negotiation
+steps in the final 500 episodes where all agents chose to communicate.
+
+**Training initialisation note:** Experiment 2 uses a separate `comm_gate.pt` module.
+The `--init` step writes it automatically when `--comm-gate` is passed (handled by the
+grid script).  Do NOT share a `weights/` directory between Experiment 2 and baseline runs.
+
+---
+
+### Reading experiment logs
+
+Each run produces a JSONL log at `runs/battleship_grid/<ts>/<run_id>/logs/*.jsonl`.
+The first line is a `{"_meta": {...}}` record containing all hyperparameters including
+`use_wm_intention`, `comms_loss_prob`, `use_comm_gate`, and `comm_penalty`.
+
+Each subsequent line is one episode:
+
+```json
+{
+  "ep": 42,
+  "reward": 3.21,
+  "steps": 28,
+  "boss_hits": 2,
+  "agents_won": true,
+  "comms_ok": 25,
+  "comms_total": 28,
+  "comm_rate": 0.893,
+  "curriculum_stage": 3
+}
+```
+
+`comm_rate = comms_ok / comms_total`:
+- Experiment 1: equals 1 for baseline/WM-0% runs; drops proportionally to `comms_loss_prob`
+  for WM-10/20/30 runs.
+- Experiment 2: starts near 1.0 and decreases as agents learn the penalty is too high.
+  Compare across penalty levels to see the learned trade-off.
+
 
 Also in training, we should be doing less steps per gradient update? Or just shorten episodes

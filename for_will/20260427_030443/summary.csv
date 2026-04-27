@@ -1,0 +1,2 @@
+run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,final_curriculum_stage,last500_comm_rate,log_file,trainer_log
+wm_loss20_seed0,wm_loss20,0,1000,0.774000,2.714000,0.010000,2.714000,0.154000,2.434690,0.099233,1.002707,4.264701,-1,0.799442,runs/battleship_grid/20260427_030443/wm_loss20_seed0/logs/seqcomm_20260427_030444.jsonl,runs/battleship_grid/20260427_030443/wm_loss20_seed0/trainer.jsonl

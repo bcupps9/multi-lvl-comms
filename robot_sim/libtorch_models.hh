@@ -56,6 +56,14 @@ struct LibtorchNeuralModels : NeuralModels {
             *m = torch::jit::optimize_for_inference(*m);
         }
 
+        // Optional Experiment 2 comm gate: load if present, skip silently if not.
+        fs::path cg_path = fs::path(weights_dir) / "comm_gate.pt";
+        if (fs::exists(cg_path)) {
+            comm_gate_     = torch::jit::load(cg_path.string());
+            comm_gate_.eval();
+            has_comm_gate_ = true;
+        }
+
         // Keep un-optimised master copies so update_from_blob() can update
         // parameters in-place without re-loading from disk each episode.
         master_encoder_     = torch::jit::load((fs::path(weights_dir) / "encoder.pt").string());
@@ -67,6 +75,8 @@ struct LibtorchNeuralModels : NeuralModels {
         for (auto* m : {&master_encoder_, &master_attn_a_, &master_attn_w_,
                         &master_world_model_, &master_policy_, &master_critic_})
             m->eval();
+
+        weights_dir_ = weights_dir;
 
         // Read dims from config.json
         fs::path cfg_path = fs::path(weights_dir) / "config.json";
@@ -208,6 +218,15 @@ struct LibtorchNeuralModels : NeuralModels {
         return critic_.forward({ctx_t}).toTensor().item<float>();
     }
 
+    // Comm gate logit: σ^{-1}(P(communicate)) = CommGate(h).
+    // Returns +inf (always comm) when comm_gate.pt is not loaded.
+    float comm_gate(std::span<const float> h) override {
+        if (!has_comm_gate_) return 1e9f;
+        torch::NoGradGuard ng;
+        auto h_t = span_to_tensor(h).unsqueeze(0);                  // (1, embed_dim)
+        return comm_gate_.forward({h_t}).toTensor().item<float>();
+    }
+
     // M(context_w): world model → (next_obs_all_agents_flat, reward)
     std::pair<std::vector<float>, float>
     world_model(std::span<const float> context) override {
@@ -290,6 +309,16 @@ struct LibtorchNeuralModels : NeuralModels {
         critic_      = master_critic_.deepcopy();
         for (auto* m : {&encoder_, &attn_a_, &attn_w_, &world_model_, &policy_, &critic_})
             m->eval();
+
+        // Comm gate is saved separately by the Python trainer (not in weights.bin).
+        // Reload from disk when available; tiny file so disk I/O cost is negligible.
+        if (has_comm_gate_) {
+            fs::path cg_path = fs::path(weights_dir_) / "comm_gate.pt";
+            if (fs::exists(cg_path)) {
+                comm_gate_ = torch::jit::load(cg_path.string());
+                comm_gate_.eval();
+            }
+        }
     }
 
 private:
@@ -307,6 +336,11 @@ private:
     torch::jit::Module master_world_model_;
     torch::jit::Module master_policy_;
     torch::jit::Module master_critic_;
+
+    // Comm gate (Experiment 2) — optional, loaded if comm_gate.pt exists.
+    torch::jit::Module comm_gate_;
+    bool               has_comm_gate_ = false;
+    std::string        weights_dir_;
 
     int n_agents_;
     int embed_dim_  = 64;

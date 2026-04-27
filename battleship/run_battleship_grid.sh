@@ -25,6 +25,12 @@ MODE="${MODE:-seqcomm}"
 EPISODES="${EPISODES:-5000}"
 SEEDS="${SEEDS:-0 1 2}"
 
+# ── Experiment selection ───────────────────────────────────────────────────────
+# EXP=baseline  → standard curriculum runs (default)
+# EXP=exp1      → Exp1: world-model intention + comms-loss variants
+# EXP=exp2      → Exp2: optional comm gate with 3 penalty levels
+EXP="${EXP:-baseline}"
+
 AGENTS="${AGENTS:-2}"
 BOSS="${BOSS:-1}"
 SIGHT="${SIGHT:-2}"
@@ -45,6 +51,15 @@ GRAD_CLIP="${GRAD_CLIP:-1.0}"
 TRAINER_GRACE_SEC="${TRAINER_GRACE_SEC:-60}"
 CPP_AFTER_PY_GRACE_SEC="${CPP_AFTER_PY_GRACE_SEC:-300}"
 
+# Experiment 1 flags (passed through to sim)
+WM_INTENTION="${WM_INTENTION:-0}"    # 1 = use world-model intention ordering
+WM_H="${WM_H:-2}"                    # rollout horizon for WM
+COMMS_LOSS="${COMMS_LOSS:-0.0}"      # fraction of steps with random ordering
+
+# Experiment 2 flags
+COMM_GATE="${COMM_GATE:-0}"          # 1 = enable comm gate
+COMM_PENALTY="${COMM_PENALTY:-0.0}"  # reward cost per comm step
+
 OBS_DIM=$(( (2 * SIGHT + 1) * (2 * SIGHT + 1) * 3 + 4 ))
 RUN_ROOT="${RUN_ROOT:-runs/battleship_grid/$(date +%Y%m%d_%H%M%S)}"
 SUMMARY_CSV="$RUN_ROOT/summary.csv"
@@ -57,6 +72,27 @@ current_run_id=""
 # To run a single config: SINGLE_CONFIG="curriculum|8|0.0003|0.003|0.10" bash run_battleship_grid.sh
 if [[ -n "${SINGLE_CONFIG:-}" ]]; then
     CONFIGS=("$SINGLE_CONFIG")
+elif [[ "$EXP" == "exp1" ]]; then
+    # Experiment 1: compare critic proxy vs world-model intention ordering,
+    # with four comms-loss levels (0%, 10%, 20%, 30%).
+    # The first config uses critic (baseline_critic); the rest use WM intention.
+    #   name           | update_every | lr_policy | entropy | near_boss
+    CONFIGS=(
+        "baseline_critic|16|0.0003|0.003|0.15"
+        "wm_loss00|16|0.0003|0.003|0.15"
+        "wm_loss10|16|0.0003|0.003|0.15"
+        "wm_loss20|16|0.0003|0.003|0.15"
+        "wm_loss30|16|0.0003|0.003|0.15"
+    )
+elif [[ "$EXP" == "exp2" ]]; then
+    # Experiment 2: comm gate with three penalty sizes.
+    # All use WM intention for ordering when comm succeeds.
+    #   name              | update_every | lr_policy | entropy | near_boss
+    CONFIGS=(
+        "commgate_tiny|16|0.0003|0.003|0.15"
+        "commgate_medium|16|0.0003|0.003|0.15"
+        "commgate_large|16|0.0003|0.003|0.15"
+    )
 else
     CONFIGS=(
         "curriculum|16|0.0003|0.003|0.15"
@@ -103,7 +139,7 @@ elif [[ ! -x "$SIM_BIN" ]]; then
     exit 1
 fi
 
-printf 'run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,final_curriculum_stage,log_file,trainer_log\n' > "$SUMMARY_CSV"
+printf 'run_id,config,seed,episodes_logged,last500_win,last500_boss_hits,last500_zero_hit,last500_agent_hits,last500_timeout,last500_fire_dist,last500_oob_rate,last_policy_std,last_entropy,final_curriculum_stage,last500_comm_rate,log_file,trainer_log\n' > "$SUMMARY_CSV"
 
 cleanup_pair() {
     local py_pid="${1:-}"
@@ -173,6 +209,7 @@ fire_dist = sum(float(r.get("mean_fire_dist", 0.0)) for r in tail) / n
 shots = sum(float(r.get("agent_shots", 0.0)) for r in tail)
 oob = sum(float(r.get("fire_oob", 0.0)) for r in tail) / max(1.0, shots)
 final_stage = rows[-1].get("curriculum_stage", -1) if rows else -1
+comm_rate = sum(float(r.get("comm_rate", 1.0)) for r in tail) / n
 
 last_policy_std = ""
 last_entropy = ""
@@ -205,6 +242,7 @@ writer.writerow([
     last_policy_std,
     last_entropy,
     final_stage,
+    f"{comm_rate:.6f}",
     log_file,
     trainer_log,
 ])
@@ -243,15 +281,34 @@ run_one() {
     echo "config: update_every=$update_every lr_policy=$lr_policy entropy=$entropy_coef near_boss=$near_boss boss_period=$BOSS_FIRE_PERIOD boss_lag=$BOSS_AIM_LAG seed=$seed"
     echo "note: curriculum configs override boss_period/boss_lag by stage"
 
+    # Comm gate init flag (Experiment 2)
+    comm_gate_init_flag=""
+    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]]; then
+        comm_gate_init_flag="--comm-gate"
+    fi
+
     "$PYTHON" battleship/train_battleship.py "$weights_dir" \
         --init \
         --obs-dim "$OBS_DIM" \
         --n-agents "$AGENTS" \
+        $comm_gate_init_flag \
         > "$stdout_dir/init.out" 2>&1
 
     rm -f "$weights_dir/traj.ready" "$weights_dir/weights.ready" "$weights_dir/traj.done"
 
     rm -f "$py_status_file" "$cpp_status_file"
+
+    # Comm gate trainer flags (Experiment 2)
+    comm_gate_train_flags=""
+    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]]; then
+        comm_gate_train_flags="--comm-gate"
+        case "$config_name" in
+            commgate_tiny)   comm_gate_train_flags="$comm_gate_train_flags --comm-penalty 0.005" ;;
+            commgate_medium) comm_gate_train_flags="$comm_gate_train_flags --comm-penalty 0.050" ;;
+            commgate_large)  comm_gate_train_flags="$comm_gate_train_flags --comm-penalty 0.500" ;;
+            *)               comm_gate_train_flags="$comm_gate_train_flags --comm-penalty ${COMM_PENALTY:-0.0}" ;;
+        esac
+    fi
 
     (
         set +e
@@ -264,7 +321,8 @@ run_one() {
             --lr-policy "$lr_policy" \
             --entropy-coef "$entropy_coef" \
             --grad-clip "$GRAD_CLIP" \
-            --trainer-log "$trainer_log" &
+            --trainer-log "$trainer_log" \
+            $comm_gate_train_flags &
         child_pid=$!
         trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$py_status_file"; exit 143' INT TERM HUP
         wait "$child_pid"
@@ -283,6 +341,35 @@ run_one() {
         if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]]; then
             curriculum_flag="--curriculum"
         fi
+
+        # ── Experiment 1: world-model intention flags ──────────────────────────
+        exp1_flags=""
+        if [[ "$EXP" == "exp1" && "$config_name" != "baseline_critic" ]]; then
+            exp1_flags="--wm-intention --wm-H $WM_H"
+            # Per-config comms-loss values
+            case "$config_name" in
+                wm_loss00) exp1_flags="$exp1_flags --comms-loss 0.00" ;;
+                wm_loss10) exp1_flags="$exp1_flags --comms-loss 0.10" ;;
+                wm_loss20) exp1_flags="$exp1_flags --comms-loss 0.20" ;;
+                wm_loss30) exp1_flags="$exp1_flags --comms-loss 0.30" ;;
+            esac
+        elif [[ "${WM_INTENTION:-0}" == "1" ]]; then
+            exp1_flags="--wm-intention --wm-H $WM_H --comms-loss $COMMS_LOSS"
+        fi
+
+        # ── Experiment 2: comm gate flags ──────────────────────────────────────
+        exp2_flags=""
+        if [[ "$EXP" == "exp2" ]]; then
+            exp2_flags="--comm-gate --wm-intention --wm-H $WM_H"
+            case "$config_name" in
+                commgate_tiny)   exp2_flags="$exp2_flags --comm-penalty 0.005" ;;
+                commgate_medium) exp2_flags="$exp2_flags --comm-penalty 0.050" ;;
+                commgate_large)  exp2_flags="$exp2_flags --comm-penalty 0.500" ;;
+            esac
+        elif [[ "${COMM_GATE:-0}" == "1" ]]; then
+            exp2_flags="--comm-gate --comm-penalty $COMM_PENALTY"
+        fi
+
         "$SIM_BIN" "$weights_dir" \
             --mode "$MODE" \
             --episodes "$EPISODES" \
@@ -301,7 +388,7 @@ run_one() {
             --hit-self "$HIT_SELF" \
             --win-reward "$WIN_REWARD" \
             --log-dir "$log_dir" \
-            $curriculum_flag &
+            $curriculum_flag $exp1_flags $exp2_flags &
         child_pid=$!
         trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$cpp_status_file"; exit 143' INT TERM HUP
         wait "$child_pid"
