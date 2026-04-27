@@ -37,6 +37,7 @@ LR_ENC="${LR_ENC:-0.0001}"
 LR_WORLD="${LR_WORLD:-0.0003}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 TRAINER_GRACE_SEC="${TRAINER_GRACE_SEC:-60}"
+CPP_AFTER_PY_GRACE_SEC="${CPP_AFTER_PY_GRACE_SEC:-300}"
 
 OBS_DIM=$(( (2 * SIGHT + 1) * (2 * SIGHT + 1) * 3 + 2 ))
 RUN_ROOT="${RUN_ROOT:-runs/battleship_grid/$(date +%Y%m%d_%H%M%S)}"
@@ -62,7 +63,7 @@ find_existing_battleship_processes() {
         echo "$matches"
         return
     fi
-    ps -axo pid=,command= | awk '
+    ps -axo pid=,command= 2>/dev/null | awk '
         /battleship\/train_battleship\.py|battleship-sim/ && $0 !~ /awk/ {
             print
         }
@@ -210,6 +211,8 @@ run_one() {
     local trainer_log="$run_dir/trainer.jsonl"
     local cpp_out="$stdout_dir/cpp.out"
     local py_out="$stdout_dir/python.out"
+    local cpp_status_file="$stdout_dir/cpp.status"
+    local py_status_file="$stdout_dir/python.status"
 
     if [[ -e "$run_dir" ]]; then
         echo "Refusing to overwrite existing run directory: $run_dir" >&2
@@ -230,56 +233,74 @@ run_one() {
 
     rm -f "$weights_dir/traj.ready" "$weights_dir/weights.ready" "$weights_dir/traj.done"
 
-    "$PYTHON" battleship/train_battleship.py "$weights_dir" \
-        --obs-dim "$OBS_DIM" \
-        --n-agents "$AGENTS" \
-        --update-every "$update_every" \
-        --lr-enc "$LR_ENC" \
-        --lr-world "$LR_WORLD" \
-        --lr-policy "$lr_policy" \
-        --entropy-coef "$entropy_coef" \
-        --grad-clip "$GRAD_CLIP" \
-        --trainer-log "$trainer_log" \
-	    > "$py_out" 2>&1 &
+    rm -f "$py_status_file" "$cpp_status_file"
+
+    (
+        set +e
+        "$PYTHON" battleship/train_battleship.py "$weights_dir" \
+            --obs-dim "$OBS_DIM" \
+            --n-agents "$AGENTS" \
+            --update-every "$update_every" \
+            --lr-enc "$LR_ENC" \
+            --lr-world "$LR_WORLD" \
+            --lr-policy "$lr_policy" \
+            --entropy-coef "$entropy_coef" \
+            --grad-clip "$GRAD_CLIP" \
+            --trainer-log "$trainer_log" &
+        child_pid=$!
+        trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$py_status_file"; exit 143' INT TERM HUP
+        wait "$child_pid"
+        status=$?
+        trap - INT TERM HUP
+        printf '%s\n' "$status" > "$py_status_file"
+        exit "$status"
+    ) > "$py_out" 2>&1 &
     local py_pid=$!
     current_py_pid="$py_pid"
     current_run_id="$run_id"
 
-    "$SIM_BIN" "$weights_dir" \
-        --mode "$MODE" \
-        --episodes "$EPISODES" \
-        --seed "$seed" \
-        --agents "$AGENTS" \
-        --boss "$BOSS" \
-        --sight "$SIGHT" \
-        --fire "$FIRE" \
-        --steps "$STEPS" \
-        --survive "$SURVIVE" \
-        --near-boss "$near_boss" \
-        --win-reward "$WIN_REWARD" \
-        --log-dir "$log_dir" \
-	    > "$cpp_out" 2>&1 &
+    (
+        set +e
+        "$SIM_BIN" "$weights_dir" \
+            --mode "$MODE" \
+            --episodes "$EPISODES" \
+            --seed "$seed" \
+            --agents "$AGENTS" \
+            --boss "$BOSS" \
+            --sight "$SIGHT" \
+            --fire "$FIRE" \
+            --steps "$STEPS" \
+            --survive "$SURVIVE" \
+            --near-boss "$near_boss" \
+            --win-reward "$WIN_REWARD" \
+            --log-dir "$log_dir" &
+        child_pid=$!
+        trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$cpp_status_file"; exit 143' INT TERM HUP
+        wait "$child_pid"
+        status=$?
+        trap - INT TERM HUP
+        printf '%s\n' "$status" > "$cpp_status_file"
+        exit "$status"
+    ) > "$cpp_out" 2>&1 &
     local cpp_pid=$!
     current_cpp_pid="$cpp_pid"
-    printf 'python_pid=%s\ncpp_pid=%s\n' "$py_pid" "$cpp_pid" > "$stdout_dir/pids.env"
+    printf 'python_pid=%s\ncpp_pid=%s\npython_status=%s\ncpp_status=%s\n' \
+        "$py_pid" "$cpp_pid" "$py_status_file" "$cpp_status_file" > "$stdout_dir/pids.env"
 
     local cpp_status=0
     local py_status=0
     local py_collected=0
 
     while true; do
-        local cpp_alive=0
-        local py_alive=0
-        kill -0 "$cpp_pid" 2>/dev/null && cpp_alive=1
-        kill -0 "$py_pid" 2>/dev/null && py_alive=1
-
-        if [[ "$cpp_alive" -eq 0 ]]; then
-            wait "$cpp_pid" || cpp_status=$?
+        if [[ -f "$cpp_status_file" ]]; then
+            cpp_status="$(cat "$cpp_status_file")"
+            wait "$cpp_pid" || true
             break
         fi
 
-        if [[ "$py_alive" -eq 0 ]]; then
-            wait "$py_pid" || py_status=$?
+        if [[ -f "$py_status_file" ]]; then
+            py_status="$(cat "$py_status_file")"
+            wait "$py_pid" || true
             py_collected=1
             if [[ "$py_status" -ne 0 ]]; then
                 echo "Python trainer exited before C++ simulator finished (status=$py_status)." >&2
@@ -289,9 +310,9 @@ run_one() {
             fi
 
             local cpp_grace=0
-            while kill -0 "$cpp_pid" 2>/dev/null; do
-                if [[ "$cpp_grace" -ge 10 ]]; then
-                    echo "Python trainer exited cleanly, but C++ simulator kept running." >&2
+            while [[ ! -f "$cpp_status_file" ]]; do
+                if [[ "$cpp_grace" -ge "$CPP_AFTER_PY_GRACE_SEC" ]]; then
+                    echo "Python trainer exited cleanly, but C++ simulator kept running after ${CPP_AFTER_PY_GRACE_SEC}s." >&2
                     cleanup_pair "" "$cpp_pid"
                     tail_logs "$cpp_out" "$py_out"
                     exit 1
@@ -299,7 +320,8 @@ run_one() {
                 sleep 1
                 cpp_grace=$((cpp_grace + 1))
             done
-            wait "$cpp_pid" || cpp_status=$?
+            cpp_status="$(cat "$cpp_status_file")"
+            wait "$cpp_pid" || true
             break
         fi
 
@@ -315,7 +337,7 @@ run_one() {
 
     if [[ "$py_collected" -eq 0 ]]; then
         local waited=0
-        while kill -0 "$py_pid" 2>/dev/null; do
+        while [[ ! -f "$py_status_file" ]]; do
             if [[ "$waited" -ge "$TRAINER_GRACE_SEC" ]]; then
                 echo "Python trainer did not exit after C++ completion; killing it." >&2
                 cleanup_pair "$py_pid" ""
@@ -326,7 +348,8 @@ run_one() {
             waited=$((waited + 1))
         done
 
-        wait "$py_pid" || py_status=$?
+        py_status="$(cat "$py_status_file")"
+        wait "$py_pid" || true
     fi
     if [[ "$py_status" -ne 0 ]]; then
         echo "Python trainer failed for $run_id (status=$py_status)." >&2
