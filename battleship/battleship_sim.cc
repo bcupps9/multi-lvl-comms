@@ -82,25 +82,29 @@ struct CurriculumStage {
     int   boss_fire_period;
     int   boss_aim_lag;
     int   max_steps;
+    float near_miss_reward;   // reward_near_boss set in env; fades to 0 by final stage
     const char* label;
 };
 
-// Stages progress by HP and deterministic boss tempo.  The boss no longer needs
-// random misses to be learnable: it fires on a predictable cadence and, by
-// default, aims at the previous-step agent cells so moving can dodge.
+// Stages progress by HP and deterministic boss tempo.  near_miss_reward starts
+// high (dense aiming signal) and decreases to 0 at the final stage so the agent
+// must earn only direct hits there — matching paper evaluation conditions.
+// One extra hp3 stage (p12) bridges the gap between hp2/p4 and hp3/p8.
 static constexpr CurriculumStage CURRICULUM[] = {
-    {1, 0.0f, 12, 1, 30, "c0:hp1/p12/t30"},
-    {1, 0.0f, 10, 1, 28, "c1:hp1/p10/t28"},
-    {1, 0.0f,  8, 1, 26, "c2:hp1/p8/t26"},
-    {1, 0.0f,  6, 1, 24, "c3:hp1/p6/t24"},
-    {2, 0.0f, 12, 1, 46, "c4:hp2/p12/t46"},
-    {2, 0.0f, 10, 1, 42, "c5:hp2/p10/t42"},
-    {2, 0.0f,  8, 1, 38, "c6:hp2/p8/t38"},
-    {2, 0.0f,  6, 1, 34, "c7:hp2/p6/t34"},
-    {2, 0.0f,  4, 1, 32, "c8:hp2/p4/t32"},
-    {3, 0.0f,  8, 1, 60, "c9:hp3/p8/t60"},
-    {3, 0.0f,  6, 1, 54, "c10:hp3/p6/t54"},
-    {3, 0.0f,  4, 1, 50, "c11:hp3/p4/t50"},
+    // hp  miss  period  lag  steps  near_miss  label
+    {1, 0.0f, 12, 1, 30, 0.20f, "c0:hp1/p12/t30"},
+    {1, 0.0f, 10, 1, 28, 0.20f, "c1:hp1/p10/t28"},
+    {1, 0.0f,  8, 1, 26, 0.15f, "c2:hp1/p8/t26"},
+    {1, 0.0f,  6, 1, 24, 0.15f, "c3:hp1/p6/t24"},
+    {2, 0.0f, 12, 1, 46, 0.10f, "c4:hp2/p12/t46"},
+    {2, 0.0f, 10, 1, 42, 0.10f, "c5:hp2/p10/t42"},
+    {2, 0.0f,  8, 1, 38, 0.05f, "c6:hp2/p8/t38"},
+    {2, 0.0f,  6, 1, 34, 0.05f, "c7:hp2/p6/t34"},
+    {2, 0.0f,  4, 1, 32, 0.02f, "c8:hp2/p4/t32"},
+    {3, 0.0f, 12, 1, 60, 0.02f, "c9:hp3/p12/t60"},   // bridge stage
+    {3, 0.0f,  8, 1, 60, 0.01f, "c10:hp3/p8/t60"},
+    {3, 0.0f,  6, 1, 54, 0.01f, "c11:hp3/p6/t54"},
+    {3, 0.0f,  4, 1, 50, 0.00f, "c12:hp3/p4/t50"},   // final: direct hits only
 };
 static constexpr int N_CURRICULUM_STAGES = static_cast<int>(
     sizeof(CURRICULUM) / sizeof(CURRICULUM[0]));
@@ -109,7 +113,7 @@ struct CurriculumTracker {
     // Advance only when the agents are winning because they can aim, not merely
     // because the current stage is forgiving.  Window resets on advance so the
     // next stage is evaluated independently.
-    static constexpr int WINDOW = 300;
+    static constexpr int WINDOW = 1000;
 
     struct Sample {
         bool won;
@@ -128,23 +132,23 @@ struct CurriculumTracker {
 
     float target_win_rate() const {
         int hp = current().boss_hp;
-        if (hp <= 1) return 0.60f;
-        if (hp == 2) return 0.62f;
-        return 0.55f;
+        if (hp <= 1) return 0.70f;
+        if (hp == 2) return 0.65f;
+        return 0.60f;
     }
 
     float target_hit_rate() const {
         int hp = current().boss_hp;
-        if (hp <= 1) return 0.014f;
-        if (hp == 2) return 0.025f;
-        return 0.032f;
+        if (hp <= 1) return 0.020f;
+        if (hp == 2) return 0.030f;
+        return 0.035f;
     }
 
     float target_zero_hit_rate() const {
         int hp = current().boss_hp;
-        if (hp <= 1) return 0.42f;
-        if (hp == 2) return 0.12f;
-        return 0.08f;
+        if (hp <= 1) return 0.30f;
+        if (hp == 2) return 0.08f;
+        return 0.05f;
     }
 
     void update_metrics() {
@@ -648,6 +652,7 @@ int main(int argc, char* argv[]) {
     int              seed      = -1;
     std::string      log_dir_str;
     bool             use_curriculum = false;
+    int              mappo_update_every = 8;
     BattleshipConfig bcfg;
     ExpConfig        exp_cfg;
 
@@ -674,6 +679,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--hit-boss"   && i+1<argc) bcfg.reward_hit_boss   = std::stof(argv[++i]);
         else if (arg == "--hit-self"   && i+1<argc) bcfg.reward_hit_self   = std::stof(argv[++i]);
         else if (arg == "--win-reward" && i+1<argc) bcfg.reward_agents_win = std::stof(argv[++i]);
+        else if (arg == "--update-every"   && i+1<argc) mappo_update_every = std::stoi(argv[++i]);
         else if (arg == "--no-survive")            bcfg.reward_survive   = 0.f;
         else if (arg == "--no-near-boss")          bcfg.reward_near_boss  = 0.f;
         else if (arg == "--no-proximity")          bcfg.reward_proximity  = 0.f;
@@ -689,7 +695,7 @@ int main(int argc, char* argv[]) {
             std::print(stderr,
                 "usage: battleship-sim [<weights_dir>] [--mode seqcomm|fixed_order|mappo]\n"
                 "  [--episodes N] [--no-train] [--seed N] [--log-dir PATH]\n"
-                "  [--curriculum]\n"
+                "  [--curriculum] [--update-every N]\n"
                 "  [--M N] [--agents N] [--boss N] [--sight N] [--fire N] [--steps N]\n"
                 "  [--boss-fire N] [--boss-fire-period N] [--boss-aim-lag N]\n"
                 "  [--survive R] [--near-boss R] [--proximity R] [--win-reward R]\n"
@@ -717,11 +723,12 @@ int main(int argc, char* argv[]) {
     CurriculumTracker curriculum;
     if (use_curriculum) {
         const auto& s = curriculum.current();
-        bcfg.boss_start_hp = s.boss_hp;
-        bcfg.boss_miss_prob = s.boss_miss;
+        bcfg.boss_start_hp    = s.boss_hp;
+        bcfg.boss_miss_prob   = s.boss_miss;
         bcfg.boss_fire_period = s.boss_fire_period;
-        bcfg.boss_aim_lag = s.boss_aim_lag;
-        bcfg.max_steps = s.max_steps;
+        bcfg.boss_aim_lag     = s.boss_aim_lag;
+        bcfg.max_steps        = s.max_steps;
+        bcfg.reward_near_boss = s.near_miss_reward;
     }
 
     BattleshipEnv env(bcfg, rng);
@@ -775,14 +782,15 @@ int main(int argc, char* argv[]) {
         env.set_curriculum(CURRICULUM[0].boss_hp, CURRICULUM[0].boss_miss,
                            CURRICULUM[0].boss_fire_period,
                            CURRICULUM[0].boss_aim_lag,
-                           CURRICULUM[0].max_steps);
-        std::print("curriculum ON  stage={}  {}\n\n",
-                   curriculum.stage, CURRICULUM[0].label);
+                           CURRICULUM[0].max_steps,
+                           CURRICULUM[0].near_miss_reward);
+        std::print("curriculum ON  stage={}  {}  near_miss={:.2f}\n\n",
+                   curriculum.stage, CURRICULUM[0].label,
+                   CURRICULUM[0].near_miss_reward);
     }
 
     float reward_sum = 0.f;
     std::vector<transition> mappo_batch;   // accumulates across episodes for MAPPO
-    constexpr int MAPPO_UPDATE_EVERY = 8;
 
     for (int ep = 0; ep < n_ep; ++ep) {
         BsEpStats stats;
@@ -792,7 +800,7 @@ int main(int argc, char* argv[]) {
             stats = run_sync_episode(env, *models, ep_traj);
             mappo_batch.insert(mappo_batch.end(), ep_traj.begin(), ep_traj.end());
 
-            if (do_train && (ep + 1) % MAPPO_UPDATE_EVERY == 0 && !mappo_batch.empty()) {
+            if (do_train && (ep + 1) % mappo_update_every == 0 && !mappo_batch.empty()) {
                 write_trajectory(traj_bin.string(), mappo_batch,
                                  bcfg.n_agents, env.obs_dim(), env.action_dim());
                 touch(traj_ready);
@@ -837,13 +845,14 @@ int main(int argc, char* argv[]) {
                 const auto& s = curriculum.current();
                 env.set_curriculum(s.boss_hp, s.boss_miss,
                                    s.boss_fire_period, s.boss_aim_lag,
-                                   s.max_steps);
+                                   s.max_steps, s.near_miss_reward);
                 std::print("\n*** curriculum advance → stage {} ({})  "
-                           "wr={:.0f}% hit/shot={:.1f}% zero={:.0f}% ***\n\n",
+                           "wr={:.0f}% hit/shot={:.1f}% zero={:.0f}%  near_miss={:.2f} ***\n\n",
                            curriculum.stage, s.label,
                            curriculum.last_win_rate * 100.f,
                            curriculum.last_hit_rate * 100.f,
-                           curriculum.last_zero_hit_rate * 100.f);
+                           curriculum.last_zero_hit_rate * 100.f,
+                           s.near_miss_reward);
             }
         }
 

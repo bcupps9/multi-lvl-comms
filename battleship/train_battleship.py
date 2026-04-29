@@ -327,6 +327,7 @@ def save_torchscript(nets: dict, weights_dir: str, obs_dim: int, n_agents: int) 
     os.makedirs(weights_dir, exist_ok=True)
 
     torch.jit.script(nets['encoder']).save(os.path.join(weights_dir, 'encoder.pt'))
+    torch.jit.script(nets['encoder_wm']).save(os.path.join(weights_dir, 'encoder_wm.pt'))
     torch.jit.script(nets['attn_a']).save(os.path.join(weights_dir, 'attn_a.pt'))
     torch.jit.script(nets['attn_w']).save(os.path.join(weights_dir, 'attn_w.pt'))
     torch.jit.script(nets['world_model']).save(os.path.join(weights_dir, 'world_model.pt'))
@@ -514,14 +515,15 @@ def loss_world_model(encoder, attn_w, world_model,
 
 # ── Update ────────────────────────────────────────────────────────────────────
 
-PPO_EPOCHS = 4   # policy/value epochs per collected batch
+PPO_EPOCHS = 8   # policy/value epochs per collected batch
 
 
 def update_batch(episodes, n_agents, nets,
-                 opt_enc, opt_world, opt_pol,
+                 opt_enc_pol, opt_enc_wm, opt_world, opt_pol,
                  entropy_coef: float = ENTROPY_COEF,
                  grad_clip: float = GRAD_CLIP) -> dict:
-    encoder     = nets['encoder']
+    encoder     = nets['encoder']       # policy path only
+    encoder_wm  = nets['encoder_wm']    # world-model path only
     attn_a      = nets['attn_a']
     attn_w      = nets['attn_w']
     world_model = nets['world_model']
@@ -590,31 +592,36 @@ def update_batch(episodes, n_agents, nets,
                 total += p.grad.detach().norm().item() ** 2
         return total ** 0.5
 
-    # ── World model update (Eq 4) ──────────────────────────────────────────────
-    opt_enc.zero_grad()
+    # ── World model update (Eq 4) — uses encoder_wm only, no shared grad with policy ──
+    opt_enc_wm.zero_grad()
     opt_world.zero_grad()
-    lw = loss_world_model(encoder, attn_w, world_model,
+    lw = loss_world_model(encoder_wm, attn_w, world_model,
                           obs_wm, actions_wm, next_obs_wm, rewards_wm)
     lw.backward()
     gn_wm  = _grad_norm(list(attn_w.parameters()) + list(world_model.parameters()))
-    gn_enc_wm = _grad_norm(encoder.parameters())
+    gn_enc_wm = _grad_norm(encoder_wm.parameters())
     if grad_clip > 0:
         nn.utils.clip_grad_norm_(
-            list(encoder.parameters()) +
+            list(encoder_wm.parameters()) +
             list(attn_w.parameters()) +
             list(world_model.parameters()),
             grad_clip,
         )
     opt_world.step()
+    opt_enc_wm.step()
 
     # Policy/value: PPO_EPOCHS passes over the same batch.
     # log_probs_old are frozen from trajectory collection (lp_old_pv).
     # Re-computing log_probs each epoch lets the ratio diverge from 1 as
     # the policy updates, so the clip actually fires in later epochs.
+    # Both opt_enc_pol and opt_pol are zeroed at the start of every epoch so
+    # gradients never accumulate across epochs (fixes the previous explosion in
+    # gn_enc_pol caused by stepping opt_enc without zeroing between epochs).
     gn_pol = gn_critic = gn_enc_pol = 0.0
     lv_last = lp_last = 0.0
     pol_extras_last = {}
     for epoch in range(PPO_EPOCHS):
+        opt_enc_pol.zero_grad()
         opt_pol.zero_grad()
         lv = loss_value(encoder, attn_a, critic, obs_self_pv, up_pv, returns_pv)
         lp, pol_extras = loss_policy(encoder, attn_a, policy,
@@ -634,7 +641,7 @@ def update_batch(episodes, n_agents, nets,
                 grad_clip,
             )
         opt_pol.step()
-        opt_enc.step()
+        opt_enc_pol.step()
         lv_last, lp_last, pol_extras_last = lv.item(), lp.item(), pol_extras
 
     # Value calibration: compare mean predicted V to mean return.
@@ -673,16 +680,17 @@ def update_batch(episodes, n_agents, nets,
 
 
 def update_episode(transitions, n_agents, nets,
-                   opt_enc, opt_world, opt_pol) -> dict:
+                   opt_enc_pol, opt_enc_wm, opt_world, opt_pol) -> dict:
     return update_batch([transitions], n_agents, nets,
-                        opt_enc, opt_world, opt_pol)
+                        opt_enc_pol, opt_enc_wm, opt_world, opt_pol)
 
 
 # ── Module factory ────────────────────────────────────────────────────────────
 
 def make_nets(obs_dim: int, n_agents: int, use_comm_gate: bool = False) -> dict:
     nets = {
-        'encoder':     Encoder(obs_dim, EMBED_DIM),
+        'encoder':     Encoder(obs_dim, EMBED_DIM),   # policy path — saved to encoder.pt, used by C++
+        'encoder_wm':  Encoder(obs_dim, EMBED_DIM),   # world-model path — Python-only, never sent to C++
         'attn_a':      AttentionModule(EMBED_DIM, ACTION_DIM),
         'attn_w':      AttentionModule(EMBED_DIM, EMBED_DIM + ACTION_DIM),
         'world_model': WorldModel(EMBED_DIM, n_agents, obs_dim),
@@ -698,7 +706,9 @@ def make_optimizers(nets: dict,
                     lr_enc: float = LR_ENC,
                     lr_world: float = LR_WORLD,
                     lr_policy: float = LR_POL):
-    opt_enc = optim.Adam(nets['encoder'].parameters(), lr=lr_enc)
+    # Two separate encoder optimizers — no shared gradient paths between WM and policy.
+    opt_enc_pol = optim.Adam(nets['encoder'].parameters(), lr=lr_enc)
+    opt_enc_wm  = optim.Adam(nets['encoder_wm'].parameters(), lr=lr_enc)
     opt_world = optim.Adam(
         list(nets['attn_w'].parameters()) +
         list(nets['world_model'].parameters()),
@@ -713,13 +723,14 @@ def make_optimizers(nets: dict,
     opt_comm = None
     if 'comm_gate' in nets:
         opt_comm = optim.Adam(nets['comm_gate'].parameters(), lr=lr_policy)
-    return opt_enc, opt_world, opt_pol, opt_comm
+    return opt_enc_pol, opt_enc_wm, opt_world, opt_pol, opt_comm
 
 
 def load_from_scripts(nets: dict, weights_dir: str) -> None:
     """Warm-start nn.Module weights from existing TorchScript .pt files."""
     mapping = [
         ('encoder',     'encoder.pt'),
+        ('encoder_wm',  'encoder_wm.pt'),
         ('attn_a',      'attn_a.pt'),
         ('attn_w',      'attn_w.pt'),
         ('world_model', 'world_model.pt'),
@@ -874,7 +885,7 @@ def main():
 
     # Warm-start if weights already exist
     load_from_scripts(nets, weights_dir)
-    opt_enc, opt_world, opt_pol, opt_comm = make_optimizers(
+    opt_enc_pol, opt_enc_wm, opt_world, opt_pol, opt_comm = make_optimizers(
         nets,
         lr_enc=args.lr_enc,
         lr_world=args.lr_world,
@@ -921,7 +932,7 @@ def main():
                     t_final = time.time()
                     batch_size = len(batch)
                     losses = update_batch(batch, n_agents, nets,
-                                          opt_enc, opt_world, opt_pol,
+                                          opt_enc_pol, opt_enc_wm, opt_world, opt_pol,
                                           entropy_coef=args.entropy_coef,
                                           grad_clip=args.grad_clip)
                     if use_comm_gate and opt_comm is not None and comm_sidecar_batch:
@@ -984,7 +995,7 @@ def main():
         if did_update:
             batch_size = len(batch)
             last_losses = update_batch(batch, n_agents, nets,
-                                       opt_enc, opt_world, opt_pol,
+                                       opt_enc_pol, opt_enc_wm, opt_world, opt_pol,
                                        entropy_coef=args.entropy_coef,
                                        grad_clip=args.grad_clip)
             batch.clear()

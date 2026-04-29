@@ -118,14 +118,16 @@ struct BattleshipEnv : Environment {
     const BattleshipConfig& config() const { return cfg_; }
 
     // Update curriculum parameters; takes effect on the next reset().
+    // near_miss_reward < 0 means "leave unchanged".
     void set_curriculum(int boss_hp, float miss_prob,
                         int fire_period = -1, int aim_lag = -1,
-                        int max_steps = -1) {
+                        int max_steps = -1, float near_miss_reward = -1.f) {
         cfg_.boss_start_hp  = boss_hp;
         cfg_.boss_miss_prob = miss_prob;
-        if (fire_period > 0) cfg_.boss_fire_period = fire_period;
-        if (aim_lag >= 0) cfg_.boss_aim_lag = aim_lag;
-        if (max_steps > 0) cfg_.max_steps = max_steps;
+        if (fire_period > 0)      cfg_.boss_fire_period = fire_period;
+        if (aim_lag >= 0)         cfg_.boss_aim_lag = aim_lag;
+        if (max_steps > 0)        cfg_.max_steps = max_steps;
+        if (near_miss_reward >= 0.f) cfg_.reward_near_boss = near_miss_reward;
     }
 
     // ── Episode statistics (valid after is_done()) ──────────────────────────────
