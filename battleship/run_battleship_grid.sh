@@ -31,8 +31,19 @@ SEEDS="${SEEDS:-0}"
 # EXP=exp2      → Exp2: optional comm gate with 3 penalty levels
 EXP="${EXP:-baseline}"
 
+# Per-experiment variable defaults — applied early so SINGLE_CONFIG parallel
+# launches also pick them up (the per-EXP CONFIGS block is skipped by SINGLE_CONFIG).
+if [[ "$EXP" == "scale3" ]]; then
+    AGENTS="${AGENTS:-3}"
+    BOSS="${BOSS:-2}"
+    M="${M:-10}"
+    WM_H="${WM_H:-3}"
+    EPISODES="${EPISODES:-60000}"
+fi
+
 AGENTS="${AGENTS:-2}"
 BOSS="${BOSS:-1}"
+M="${M:-8}"           # grid side length (8 for exp1/exp2, 10 for scale3)
 SIGHT="${SIGHT:-2}"
 FIRE="${FIRE:-2}"
 BOSS_FIRE_PERIOD="${BOSS_FIRE_PERIOD:-8}"
@@ -91,6 +102,19 @@ elif [[ "$EXP" == "exp2" ]]; then
     CONFIGS=(
         "commgate_tiny|64|0.0003|0.003|0.15"
         "commgate_medium|64|0.0003|0.003|0.15"
+        "commgate_large|64|0.0003|0.003|0.15"
+    )
+elif [[ "$EXP" == "scale3" ]]; then
+    # Scale-3: 3 agents vs 2 bosses on a 10×10 grid, H=3 WM rollout.
+    # Tests Option A: does ordering signal value compound with more agents in the queue?
+    # The fourth config (commgate_large) is the 0%-comm contrast from exp2.
+    # Variable defaults (AGENTS=3 BOSS=2 M=10 WM_H=3 EPISODES=60000) are set above
+    # so they also apply when using SINGLE_CONFIG for parallel launches.
+    #   name              | update_every | lr_policy | entropy | near_boss
+    CONFIGS=(
+        "baseline_critic|64|0.0003|0.003|0.15"
+        "wm_loss00|64|0.0003|0.003|0.15"
+        "wm_loss30|64|0.0003|0.003|0.15"
         "commgate_large|64|0.0003|0.003|0.15"
     )
 else
@@ -281,9 +305,9 @@ run_one() {
     echo "config: update_every=$update_every lr_policy=$lr_policy entropy=$entropy_coef near_boss=$near_boss boss_period=$BOSS_FIRE_PERIOD boss_lag=$BOSS_AIM_LAG seed=$seed"
     echo "note: curriculum configs override boss_period/boss_lag by stage"
 
-    # Comm gate init flag (Experiment 2)
+    # Comm gate init flag (Experiment 2, and scale3 commgate_large)
     comm_gate_init_flag=""
-    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]]; then
+    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]] || { [[ "$EXP" == "scale3" ]] && [[ "$config_name" == commgate* ]]; }; then
         comm_gate_init_flag="--comm-gate"
     fi
 
@@ -298,9 +322,9 @@ run_one() {
 
     rm -f "$py_status_file" "$cpp_status_file"
 
-    # Comm gate trainer flags (Experiment 2)
+    # Comm gate trainer flags (Experiment 2, and scale3 commgate_large)
     comm_gate_train_flags=""
-    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]]; then
+    if [[ "$EXP" == "exp2" ]] || [[ "${COMM_GATE:-0}" == "1" ]] || { [[ "$EXP" == "scale3" ]] && [[ "$config_name" == commgate* ]]; }; then
         comm_gate_train_flags="--comm-gate"
         case "$config_name" in
             commgate_tiny)   comm_gate_train_flags="$comm_gate_train_flags --comm-penalty 0.005" ;;
@@ -338,7 +362,7 @@ run_one() {
     (
         set +e
         curriculum_flag=""
-        if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]] || [[ "$EXP" == "exp1" ]] || [[ "$EXP" == "exp2" ]]; then
+        if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]] || [[ "$EXP" == "exp1" ]] || [[ "$EXP" == "exp2" ]] || [[ "$EXP" == "scale3" ]]; then
             curriculum_flag="--curriculum"
         fi
 
@@ -370,10 +394,22 @@ run_one() {
             exp2_flags="--comm-gate --comm-penalty $COMM_PENALTY"
         fi
 
+        # ── Scale-3: 3-agent/2-boss/10×10, H=3 WM, per-config flags ──────────
+        scale3_flags=""
+        if [[ "$EXP" == "scale3" ]]; then
+            case "$config_name" in
+                wm_loss00)      scale3_flags="--wm-intention --wm-H $WM_H" ;;
+                wm_loss30)      scale3_flags="--wm-intention --wm-H $WM_H --comms-loss 0.30" ;;
+                commgate_large) scale3_flags="--comm-gate --wm-intention --wm-H $WM_H --comm-penalty 0.500" ;;
+                baseline_critic) scale3_flags="" ;;
+            esac
+        fi
+
         "$SIM_BIN" "$weights_dir" \
             --mode "$MODE" \
             --episodes "$EPISODES" \
             --seed "$seed" \
+            --M "$M" \
             --agents "$AGENTS" \
             --boss "$BOSS" \
             --sight "$SIGHT" \
@@ -388,7 +424,7 @@ run_one() {
             --hit-self "$HIT_SELF" \
             --win-reward "$WIN_REWARD" \
             --log-dir "$log_dir" \
-            $curriculum_flag $exp1_flags $exp2_flags &
+            $curriculum_flag $exp1_flags $exp2_flags $scale3_flags &
         child_pid=$!
         trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; printf "%s\n" 143 > "$cpp_status_file"; exit 143' INT TERM HUP
         wait "$child_pid"
