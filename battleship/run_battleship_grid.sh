@@ -22,8 +22,8 @@ SIM_BIN="${SIM_BIN:-./build-local/battleship/battleship-sim}"
 BUILD_DIR="${BUILD_DIR:-build-local}"
 
 MODE="${MODE:-seqcomm}"
-EPISODES="${EPISODES:-5000}"
-SEEDS="${SEEDS:-0 1 2}"
+EPISODES="${EPISODES:-50000}"
+SEEDS="${SEEDS:-0}"
 
 # ── Experiment selection ───────────────────────────────────────────────────────
 # EXP=baseline  → standard curriculum runs (default)
@@ -78,26 +78,26 @@ elif [[ "$EXP" == "exp1" ]]; then
     # The first config uses critic (baseline_critic); the rest use WM intention.
     #   name           | update_every | lr_policy | entropy | near_boss
     CONFIGS=(
-        "baseline_critic|16|0.0003|0.003|0.15"
-        "wm_loss00|16|0.0003|0.003|0.15"
-        "wm_loss10|16|0.0003|0.003|0.15"
-        "wm_loss20|16|0.0003|0.003|0.15"
-        "wm_loss30|16|0.0003|0.003|0.15"
+        "baseline_critic|64|0.0003|0.003|0.15"
+        "wm_loss00|64|0.0003|0.003|0.15"
+        "wm_loss10|64|0.0003|0.003|0.15"
+        "wm_loss20|64|0.0003|0.003|0.15"
+        "wm_loss30|64|0.0003|0.003|0.15"
     )
 elif [[ "$EXP" == "exp2" ]]; then
     # Experiment 2: comm gate with three penalty sizes.
     # All use WM intention for ordering when comm succeeds.
     #   name              | update_every | lr_policy | entropy | near_boss
     CONFIGS=(
-        "commgate_tiny|16|0.0003|0.003|0.15"
-        "commgate_medium|16|0.0003|0.003|0.15"
-        "commgate_large|16|0.0003|0.003|0.15"
+        "commgate_tiny|64|0.0003|0.003|0.15"
+        "commgate_medium|64|0.0003|0.003|0.15"
+        "commgate_large|64|0.0003|0.003|0.15"
     )
 else
     CONFIGS=(
-        "curriculum|16|0.0003|0.003|0.15"
-        "curriculum_hi_ent|16|0.0003|0.010|0.15"
-        "curriculum_lo_lr|16|0.0001|0.003|0.15"
+        "curriculum|64|0.0003|0.003|0.15"
+        "curriculum_hi_ent|64|0.0003|0.010|0.15"
+        "curriculum_lo_lr|64|0.0001|0.003|0.15"
     )
 fi
 
@@ -338,7 +338,7 @@ run_one() {
     (
         set +e
         curriculum_flag=""
-        if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]]; then
+        if [[ "$config_name" == curriculum* ]] || [[ "${CURRICULUM:-0}" == "1" ]] || [[ "$EXP" == "exp1" ]] || [[ "$EXP" == "exp2" ]]; then
             curriculum_flag="--curriculum"
         fi
 

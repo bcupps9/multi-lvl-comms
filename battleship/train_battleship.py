@@ -466,8 +466,9 @@ def compute_gae(rewards: list, values: list,
 
 def loss_value(encoder, attn_a, critic,
                obs_self, up_pv, returns_pv):
-    """Eq 2: MSE value loss."""
-    h = encoder(obs_self)                  # (B, embed)
+    """Eq 2: MSE value loss. Detach encoder so value gradient never shapes the policy encoder."""
+    with torch.no_grad():
+        h = encoder(obs_self)              # (B, embed) — frozen features for value path
     ctx = attn_a(h, up_pv)                 # (B, embed)
     v = critic(ctx)                        # (B,)
     diff = returns_pv - v
