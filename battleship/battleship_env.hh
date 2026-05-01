@@ -140,7 +140,11 @@ struct BattleshipEnv : Environment {
         float total_reward;
         int   agent_shots;
         int   fire_oob;
+        int   wasted_shots;   // shots blocked because a teammate already targeted that cell
         float mean_fire_dist;
+        // Territorial coverage metrics
+        float mean_ally_dist;          // avg min-Chebyshev distance to nearest ally (spread signal)
+        std::vector<int> boss_hit_counts;  // per-boss: how many cells were hit this episode
         std::vector<int> fire_dist_counts;   // 0..fire_range, then >fire_range
         std::array<int, 5> move_counts;      // stay, N, S, E, W
         std::vector<int> fire_offset_counts; // row-major over [-fire_range, fire_range]^2
@@ -164,6 +168,11 @@ private:
     int   ep_agent_hits_ = 0;
     int   ep_agent_shots_ = 0;
     int   ep_fire_oob_ = 0;
+    int   ep_wasted_shots_ = 0;
+    // Territorial coverage accumulators
+    float ep_ally_dist_sum_   = 0.f;  // sum of per-agent min-ally distances across all steps
+    int   ep_ally_dist_n_     = 0;    // number of (agent, step) samples
+    std::vector<int> ep_boss_hit_counts_;  // per-boss hit tally
     int   ep_fire_dist_samples_ = 0;
     float ep_fire_dist_sum_ = 0.f;
     std::vector<int> ep_fire_dist_counts_;

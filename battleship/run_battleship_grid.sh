@@ -34,9 +34,9 @@ EXP="${EXP:-baseline}"
 # Per-experiment variable defaults — applied early so SINGLE_CONFIG parallel
 # launches also pick them up (the per-EXP CONFIGS block is skipped by SINGLE_CONFIG).
 if [[ "$EXP" == "scale3" ]]; then
-    AGENTS="${AGENTS:-3}"
-    BOSS="${BOSS:-2}"
-    M="${M:-10}"
+    AGENTS="${AGENTS:-5}"
+    BOSS="${BOSS:-5}"
+    M="${M:-12}"
     WM_H="${WM_H:-3}"
     EPISODES="${EPISODES:-60000}"
 fi

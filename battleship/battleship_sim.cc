@@ -221,7 +221,10 @@ struct BsEpStats {
     std::vector<int> first_mover_counts;
     int   agent_shots        = 0;
     int   fire_oob           = 0;
+    int   wasted_shots       = 0;
     float mean_fire_dist     = 0.f;
+    float mean_ally_dist     = 0.f;
+    std::vector<int> boss_hit_counts;
     std::vector<int> fire_dist_counts;
     std::array<int, 5> move_counts{};
     std::vector<int> fire_offset_counts;
@@ -408,7 +411,10 @@ static CotamerResult run_cotamer_episode(BattleshipEnv& env,
     s.boss_won   = env_s.boss_won;
     s.agent_shots = env_s.agent_shots;
     s.fire_oob = env_s.fire_oob;
+    s.wasted_shots = env_s.wasted_shots;
     s.mean_fire_dist = env_s.mean_fire_dist;
+    s.mean_ally_dist = env_s.mean_ally_dist;
+    s.boss_hit_counts = env_s.boss_hit_counts;
     s.fire_dist_counts = env_s.fire_dist_counts;
     s.move_counts = env_s.move_counts;
     s.fire_offset_counts = env_s.fire_offset_counts;
@@ -527,7 +533,10 @@ static BsEpStats run_sync_episode(BattleshipEnv& env, NeuralModels& models,
     s.boss_won   = env_s.boss_won;
     s.agent_shots = env_s.agent_shots;
     s.fire_oob = env_s.fire_oob;
+    s.wasted_shots = env_s.wasted_shots;
     s.mean_fire_dist = env_s.mean_fire_dist;
+    s.mean_ally_dist = env_s.mean_ally_dist;
+    s.boss_hit_counts = env_s.boss_hit_counts;
     s.fire_dist_counts = env_s.fire_dist_counts;
     s.move_counts = env_s.move_counts;
     s.fire_offset_counts = env_s.fire_offset_counts;
@@ -584,7 +593,10 @@ static void write_ep_log(std::ofstream& f, int ep, const BsEpStats& s) {
       << "\"boss_won\": " << jb(s.boss_won) << ", "
       << "\"agent_shots\": " << s.agent_shots << ", "
       << "\"fire_oob\": " << s.fire_oob << ", "
+      << "\"wasted_shots\": " << s.wasted_shots << ", "
       << "\"mean_fire_dist\": " << jn(s.mean_fire_dist) << ", "
+      << "\"mean_ally_dist\": " << jn(s.mean_ally_dist) << ", "
+      << "\"boss_hit_counts\": " << [&]{ std::string o="["; for(int i=0;i<(int)s.boss_hit_counts.size();++i){if(i)o+=","; o+=std::to_string(s.boss_hit_counts[i]);} return o+"]"; }() << ", "
       << "\"fire_dist_counts\": ";
     write_int_array(f, s.fire_dist_counts);
     f << ", \"move_counts\": ";

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <climits>
+#include <unordered_set>
 
 namespace seqcomm {
 namespace cot = cotamer;
@@ -36,6 +37,10 @@ std::vector<std::vector<float>> BattleshipEnv::reset() {
     ep_agent_hits_ = 0;
     ep_agent_shots_ = 0;
     ep_fire_oob_ = 0;
+    ep_wasted_shots_ = 0;
+    ep_ally_dist_sum_ = 0.f;
+    ep_ally_dist_n_   = 0;
+    ep_boss_hit_counts_.assign(cfg_.n_boss, 0);
     ep_fire_dist_samples_ = 0;
     ep_fire_dist_sum_ = 0.f;
     ep_fire_dist_counts_.assign(cfg_.fire_range + 2, 0);
@@ -290,6 +295,11 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
     std::fill(step_reward_.begin(), step_reward_.end(), 0.f);
     float shared_reward = 0.f;
 
+    // Track which cells have already been targeted this step so duplicate shots
+    // are wasted (second agent to fire at the same cell gets nothing).
+    std::unordered_set<int> fired_cells;
+    fired_cells.reserve(cfg_.n_agents);
+
     // Agents act.
     for (int i = 0; i < cfg_.n_agents; ++i) {
         if (agents_[i].sunk()) continue;
@@ -297,6 +307,19 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         int dir = decode_move(a[0]);
         ++ep_move_counts_[dir];
         move_ship(agents_[i], DR[dir], DC[dir]);
+
+        // Territorial coverage: min Chebyshev distance to nearest alive ally.
+        int min_ally_d = INT_MAX;
+        for (int j = 0; j < cfg_.n_agents; ++j) {
+            if (j == i || agents_[j].sunk()) continue;
+            int d = std::max(std::abs(agents_[i].cr - agents_[j].cr),
+                             std::abs(agents_[i].cc - agents_[j].cc));
+            min_ally_d = std::min(min_ally_d, d);
+        }
+        if (min_ally_d != INT_MAX) {
+            ep_ally_dist_sum_ += static_cast<float>(min_ally_d);
+            ++ep_ally_dist_n_;
+        }
 
         auto [fdr, fdc] = decode_fire(a[1], a[2], cfg_.fire_range);
         int fire_span = 2 * cfg_.fire_range + 1;
@@ -307,8 +330,18 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
         int tr = agents_[i].cr + fdr;
         int tc = agents_[i].cc + fdc;
         ++ep_agent_shots_;
-        if (tr < 0 || tr >= cfg_.M || tc < 0 || tc >= cfg_.M)
+        if (tr < 0 || tr >= cfg_.M || tc < 0 || tc >= cfg_.M) {
             ++ep_fire_oob_;
+            continue;  // out-of-bounds: no dedup entry, no near-miss reward
+        }
+
+        int cell_key = tr * cfg_.M + tc;
+        if (fired_cells.count(cell_key)) {
+            // Another agent already fired here this step — wasted shot.
+            ++ep_wasted_shots_;
+            continue;
+        }
+        fired_cells.insert(cell_key);
 
         int dist = nearest_live_boss_dist(tr, tc);
         if (dist != INT_MAX) {
@@ -319,10 +352,18 @@ void BattleshipEnv::step_env(const std::vector<std::vector<float>>& actions) {
                 ++ep_fire_dist_counts_[bucket];
         }
 
+        // Peek at target cell before fire_at clears it — needed for boss_id tracking.
+        int target_boss_id = -1;
+        if (at(tr, tc).type == 2)
+            target_boss_id = at(tr, tc).ship_id;
+
         if (fire_at(false, tr, tc)) {
             // Individual credit: only the agent who landed the hit gets this reward.
             step_reward_[i] += cfg_.reward_hit_boss;
             ++ep_boss_hits_;
+            // Track which boss was hit for territorial coverage metric.
+            if (target_boss_id >= 0 && target_boss_id < static_cast<int>(ep_boss_hit_counts_.size()))
+                ++ep_boss_hit_counts_[target_boss_id];
         } else {
             step_reward_[i] += near_boss_reward(tr, tc);
         }
@@ -485,6 +526,9 @@ BattleshipEnv::EpisodeStats BattleshipEnv::episode_stats() const {
     float mean_fire_dist = ep_fire_dist_samples_ > 0
         ? ep_fire_dist_sum_ / static_cast<float>(ep_fire_dist_samples_)
         : 0.f;
+    float mean_ally_dist = ep_ally_dist_n_ > 0
+        ? ep_ally_dist_sum_ / static_cast<float>(ep_ally_dist_n_)
+        : 0.f;
     return {
         step_,
         ep_boss_hits_,
@@ -494,7 +538,10 @@ BattleshipEnv::EpisodeStats BattleshipEnv::episode_stats() const {
         ep_reward_,
         ep_agent_shots_,
         ep_fire_oob_,
+        ep_wasted_shots_,
         mean_fire_dist,
+        mean_ally_dist,
+        ep_boss_hit_counts_,
         ep_fire_dist_counts_,
         ep_move_counts_,
         ep_fire_offset_counts_,
