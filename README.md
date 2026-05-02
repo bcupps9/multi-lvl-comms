@@ -1,9 +1,21 @@
 # multi-lvl-comms
 
-C++ + Python implementation of **SeqComm** (NeurIPS 2024): multi-agent coordination
-via sequential communication. Agents negotiate a priority order each timestep based
-on estimated future return, then cascade actions from highest to lowest — each agent
-sees what the agents above it chose before making its own decision.
+> **CS 2860 Final Project** · Lux Hogan-Murphy · Will Sherwood · Bobby Cupps  
+> *No, You Go: Simulating Multi-Robot Coordination with Multi-Level Communication*
+
+A C++ + Python implementation of **SeqComm** — multi-agent coordination via sequential communication — extended with communication dropout, learned communication gates, and a custom Battleship grid environment. Built on top of [Ding et al., NeurIPS 2024](multi-lvl-paper.pdf).
+
+---
+
+## What this is
+
+Standard multi-agent RL algorithms (MAPPO, QMIX) have every agent choose its action simultaneously. This creates **circular dependencies**: agent A's best action depends on B's choice, but B's depends on A's. SeqComm breaks the cycle by running a *negotiation phase* before every timestep that establishes a priority ordering — the first-mover commits its action, and each subsequent agent conditions on what the agents above it already decided.
+
+This repo tests three questions:
+
+1. **Does world-model-based ordering outperform critic-based ordering?** (Yes — 3.8× faster to 90% win on 2v1)
+2. **What happens when communication is unreliable or penalised?** (Dropout acts as regularisation; lower comm rate → more robust final policy)
+3. **Can agents learn to decide for themselves whether to communicate?** (Yes — a learned gate suppresses all communication when the task doesn't require it)
 
 ---
 
@@ -11,735 +23,210 @@ sees what the agents above it chose before making its own decision.
 
 ```
 multi-lvl-comms/
-├── CMakeLists.txt              root cmake — delegates to robot_sim/
-├── requirements.txt            Python deps (torch, numpy)
 │
-├── training/
-│   ├── train.py                Python-only training (run with: python -m training.train)
-│   ├── train_from_cpp.py       Python updater for the C++ ↔ Python training loop
-│   └── train_world_model.py    PyTorch modules, MAPPO losses, GAE, save_weights()
+├── battleship/                      ← main experiment
+│   ├── battleship_env.hh/.cc        C++ grid environment — ships, hits, curriculum
+│   ├── battleship_sim.cc            C++ training loop — IPC with Python via traj.bin
+│   ├── train_battleship.py          Python trainer — PPO, world model, CommGate
+│   ├── run_battleship_grid.sh       Launch one or many parallel runs (the main script)
+│   ├── run_battleship_comparison.sh SeqComm vs MAPPO head-to-head
+│   ├── plot_battleship.py           Per-run figure generator
+│   └── make_paper_figures.py        Generates figures/fig1–fig3 for the paper
 │
-├── math.md                     Mathematical foundations for the team poker test env
+├── robot_sim/                       ← original seqcomm sim (intersection / gaussian)
+│   ├── seqcomm_sim.cc               Single-episode demo — no libtorch needed
+│   └── seqcomm_sim_trained.cc       Multi-episode C++ loop with weight reloading
 │
-├── execution/
-│   ├── gaussian_field_env.py   Python mirror of the C++ environment (used during training)
-│   ├── island_coverage_env.py  Island coverage coordination environment
-│   ├── intersection_env.py     Intersection crossing environment
-│   └── team_poker_env.py       Team poker environment (SeqComm overgeneralization test)
+├── cotamer/                         ← async coroutine runtime (C++20 coroutines)
 │
-├── weights/                    TorchScript .pt files written by train.py (gitignored if large)
+├── training/                        ← Python-only training (older environments)
 │
-├── robot_sim/
-│   ├── agent_action.hh/.cc     Agent coroutine tasks + NeuralModels/Environment interfaces
-│   ├── gaussian_field_env.hh/.cc  First test environment (2D Gaussian coverage)
-│   ├── seqcomm_sim.cc          Single-episode demo — random stub models (no libtorch needed)
-│   ├── seqcomm_sim_trained.cc  Multi-episode C++ training loop — loads/reloads weights/
-│   ├── libtorch_models.hh      LibTorchNeuralModels: NeuralModels impl backed by .pt files
-│   ├── trajectory_io.hh        Flat binary serializer for std::vector<transition>
-│   ├── netsim.hh               Async channel<T>/port<T> message passing
-│   ├── pancy_msgs.hh           SeqComm message types + std::formatter specialisations
-│   ├── random_source.hh        Seeded RNG with uniform/normal/exponential/hex helpers
-│   └── utils.hh                randomly_seeded<> + durational concept
+├── figures/                         ← paper figures (generated)
+│   ├── fig1_curriculum.png
+│   ├── fig2_2v1_grid.png
+│   └── fig3_scale.png
 │
-└── cotamer/                    C++23 coroutine framework (task, event, after, loop)
+├── runs/                            ← all training logs (gitignored)
+│
+├── weights_bs/                      ← TorchScript .pt files (C++ reads these)
+├── final_report/
+│   └── references.bib
+├── EXPERIMENT_DEPOT.md              ← full run-by-run experimental narrative
+├── CMakeLists.txt
+├── requirements.txt
+└── setup-local.sh                   ← one-shot local build script
 ```
 
 ---
 
-## Build and run
+## Architecture
 
-### Stub simulation (no libtorch needed)
+### How training works
+
+Training is a two-process loop. The **C++ simulator** (`battleship-sim`) runs episodes as fast as it can, writing completed trajectory batches to `weights_bs/traj.bin` and touching `weights_bs/traj.ready`. The **Python trainer** (`train_battleship.py`) watches for that signal, reads the batch, runs PPO updates, writes new weights to `weights_bs/weights.bin`, and signals back. The C++ process reloads and starts the next batch.
+
+```
+  ┌──────────────────────┐     traj.bin / traj.ready      ┌─────────────────────┐
+  │   C++ battleship-sim │  ────────────────────────────►  │  Python PPO trainer │
+  │                      │                                  │                     │
+  │  • runs episodes     │  ◄────────────────────────────  │  • GAE + PPO        │
+  │  • curriculum        │    weights.bin / weights.ready   │  • world model      │
+  │  • logs JSONL        │                                  │  • CommGate         │
+  └──────────────────────┘                                  └─────────────────────┘
+```
+
+### Neural network components
+
+| Module | Role | Used by |
+|--------|------|---------|
+| `encoder` | MLP obs → 64-dim hidden state | Policy path (C++ reads) |
+| `encoder_wm` | Separate MLP for world model features | WM path only |
+| `attn_a` | Cross-attention over agent hidden states | Policy conditioning |
+| `attn_w` | Attention for world model rollout | Intention ordering |
+| `policy` | Gaussian action head | Action sampling |
+| `critic` | State value estimator | GAE + critic ordering |
+| `world_model` | Latent next-state + reward predictor | H-step intent rollout |
+| `CommGate` | Linear → Bernoulli comm decision | CommGate configs only |
+
+> **Critical implementation note**: `encoder` and `encoder_wm` are **separate modules with separate optimisers**. Value loss gradients cannot flow into the policy encoder. Without this, the policy encoder collapses to near-zero gradient norm by PPO update 7 and the policy never learns (stuck at `policy_std ≈ 1.0` for all 50 000 episodes).
+
+### Configs
+
+| Config | Ordering | Comm model |
+|--------|----------|------------|
+| `baseline_critic` | Critic V(h) | Always comm |
+| `wm_loss00` | WM rollout H=3 | Always comm |
+| `wm_loss10/20/30` | WM rollout H=3 | Random dropout 10/20/30% |
+| `commgate_tiny` | WM rollout H=3 | Learned gate, penalty 0.05 |
+| `commgate_medium` | WM rollout H=3 | Learned gate, penalty 0.20 |
+| `commgate_large` | WM rollout H=3 | Learned gate, penalty 0.50 |
+
+---
+
+## Quickstart
+
+### Prerequisites
 
 ```bash
-cmake -B build
-cmake --build build --target seqcomm-sim
-./build/robot_sim/seqcomm-sim
+# macOS
+brew install cmake
+
+# Python 3.10+ required (3.12 recommended)
+python3 --version
 ```
 
-Requires GCC 13+ and CMake 3.16+. No external libraries.
-
-```
-SeqComm: 4 agents, T=10 H=3 F=4 obs_dim=27
-...agent 0 t=0 N_upper=0 N_lower=3
-...agent 3 t=0 N_upper=3 N_lower=0
-Episode done — transitions: 40  total_reward: 19.380
-```
-
-`RandomNeuralModels` returns random tensors of the right shapes so the full coroutine
-task graph runs before any real learning is wired in.
-
-### Training with the C++ ↔ Python loop (recommended)
-
-**Step 1 — install Python deps:**
-```bash
-pip install -r requirements.txt
-```
-
-**Step 2 — bootstrap initial weights:**
-```bash
-python -m training.train --episodes 100 --save-weights weights/
-# writes weights/encoder.pt, attn_a.pt, attn_w.pt,
-#         world_model.pt, policy.pt, critic.pt, config.json
-```
-
-**Step 3 — build the C++ training harness:**
+### 1. Clone and build
 
 ```bash
-cmake -B build-docker \
-  -DUSE_TORCH=ON \
-  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
-cmake --build build --target seqcomm-sim-trained
+git clone <repo-url> multi-lvl-comms
+cd multi-lvl-comms
+
+# Creates .venv, installs torch + deps, builds battleship-sim
+./setup-local.sh
 ```
 
-If libtorch is not found, CMake skips `seqcomm-sim-trained` and prints a hint —
-the stub `seqcomm-sim` still builds normally.
+This does three things: creates `.venv/` with PyTorch CPU, detects the libtorch prefix from the installed wheel, then runs cmake and builds the `battleship-sim` binary into `build-local/battleship/`.
 
-> **macOS only:** libtorch's prebuilt binaries require the LLVM OpenMP runtime.
-> If you see `Library not loaded: /opt/llvm-openmp/lib/libomp.dylib` at runtime, install it:
-> ```bash
-> brew install libomp
-> ```
-
-**Step 4 — run the two-process training loop:**
-```bash
-# terminal 1 — C++ sim collects trajectories with the real SeqComm protocol
-./build/robot_sim/seqcomm-sim-trained weights/ 2000
-
-# terminal 2 — Python runs MAPPO updates and saves new weights each episode
-python -m training.train_from_cpp weights/
-```
-
-```
-# C++ output:
-SeqComm C++ training loop: 4 agents  T=200  H=5  F=4  obs_dim=27  episodes=2000
-ep    0  R=   18.34  avg=   18.34  transitions=800  waiting for Python…
-  → weights reloaded
-ep    1  R=   22.10  avg=   20.22  transitions=800  waiting for Python…
-…
-
-# Python output:
-train_from_cpp: watching weights/  obs_dim=27  embed_dim=64  agents=4
-ep    0 | R=  18.34  avg=  18.34 | wm=0.0231  v=0.1842  π=0.0034  (1.2s)
-ep   10 | R=  31.50  avg=  24.11 | wm=0.0198  v=0.1531  π=0.0021  (1.1s)
-…
-```
-
-### Python-only training (no libtorch required)
+### 2. Run an experiment
 
 ```bash
-python -m training.train --env intersection --episodes 2000 --save-weights weights/ \
-    --log-dir logs/ --seed 0
+# Default: 4 configs × 1 seed × 50 000 episodes (3v3, M=10 grid)
+EXP=scale3 bash battleship/run_battleship_grid.sh
 ```
 
-Uses a Python rollout instead of the C++ sim — faster to iterate on architecture
-changes, but doesn't exercise the real concurrent SeqComm protocol.
+Results stream to `runs/battleship_grid/<timestamp>/` as JSONL. Each config runs two background processes (C++ sim + Python trainer); the script waits for both before starting the next.
 
-Key flags:
-- `--env`          — `gaussian`, `coverage`, `intersection`, or `poker` (default: gaussian)
-- `--mode`         — ablation variant (default: `seqcomm`); see table below
-- `--log-dir DIR`  — write a JSONL log to `DIR/<env>_<mode>[_<comm>]_seed<N>.jsonl`
-- `--seed N`       — fix torch + Python RNG for reproducible runs
-- `--save-every N` — checkpoint weights every N episodes in addition to the final save
-
-Team poker flags (only used with `--env poker`):
-- `--poker-M F`      — win profit multiplier (default: 2.0)
-- `--poker-alpha F`  — consolation fraction on loss α (default: 0.1)
-- `--poker-C0 F`     — starting coffers per agent (default: 100)
-- `--poker-floor F`  — bankruptcy threshold; episode ends if any agent falls below (default: 10)
-- `--poker-target F` — success threshold; episode ends if any agent exceeds (default: 1000)
-- `--poker-K N`      — max hands per episode (default: 150)
-
-Communication stressor flags (all default to perfect/lossless):
-- `--comm-delay N`  — message arrives N steps late; first N steps see zeros
-- `--comm-drop P`   — each message is independently dropped with probability P
-- `--comm-noise S`  — additive Gaussian noise with std S on every received tensor
-- `--comm-bits B`   — quantise messages to 2^B uniform levels (0 = full float32)
-
-Stressors can be combined. The comm tag is appended to the log filename only when at
-least one stressor is active, e.g. `intersection_seqcomm_delay2_drop0.3_seed0.jsonl`.
-
-Example — seqcomm under 30% packet drop:
-```bash
-python3 -m training.train \
-  --env intersection --mode seqcomm --seed 0 \
-  --episodes 2000 --log-dir logs/ \
-  --comm-drop 0.3
-```
-
-### World-model accuracy stressors
-
-These flags degrade the *intention computation* only — the env step and training
-gradients always use clean observations. They simulate the sim-to-real gap that
-appears when a world model trained in simulation is deployed on real hardware.
-
-- `--obs-noise STD`  — additive Gaussian noise on each agent's own observation
-                       before `compute_intention`. The world model was never trained
-                       on noisy inputs, so intention estimates become less reliable.
-- `--wm-H N`         — rollout horizon used in `compute_intention` at inference
-                       (training default: 5). Lower → shallower rollouts → noisier
-                       intention values and less accurate priority ordering.
-- `--wm-F N`         — random orderings sampled per intention estimate (training
-                       default: 4). Lower → higher variance in estimates.
-
-These flags are recorded in the `_meta` header and reflected in the log filename,
-e.g. `intersection_seqcomm_obsnoise0.1_H2_F1_seed0.jsonl`.
-
-Example — degraded rollout fidelity (H=1, F=1) with sensor noise:
-```bash
-python3 -m training.train \
-  --env intersection --mode seqcomm --seed 0 \
-  --episodes 2000 --log-dir logs/ \
-  --obs-noise 0.1 --wm-H 1 --wm-F 1
-```
-
-### Ablation modes
-
-| `--mode`              | Intention negotiation | Action sharing in launch | Ordering        |
-|-----------------------|-----------------------|--------------------------|-----------------|
-| `seqcomm`             | ✓ world-model rollout | ✓ upper → lower          | by intention    |
-| `mappo`               | ✗                     | ✗                        | fixed [0,1,2,3] |
-| `seqcomm_random`      | ✗                     | ✓                        | random shuffle  |
-| `seqcomm_no_action`   | ✓                     | ✗                        | by intention    |
-| `seqcomm_fixed`       | ✗                     | ✓                        | fixed [0,1,2,3] |
-
-To run all five variants for three seeds each (15 total runs):
+**Common overrides:**
 
 ```bash
-for mode in seqcomm mappo seqcomm_random seqcomm_no_action seqcomm_fixed; do
-  for seed in 0 1 2; do
-    python3 -m training.train \
-      --env intersection --mode $mode --seed $seed \
-      --episodes 2000 --log-dir logs/
-  done
-done
+# Quick smoke test — 2 000 episodes, one config
+EPISODES=2000 SINGLE_CONFIG=baseline_critic bash battleship/run_battleship_grid.sh
+
+# Full 2v1 grid (8 configs — reproduces paper Exp 1+2)
+EXP=exp2 EPISODES=50000 bash battleship/run_battleship_grid.sh
+
+# 5v5 on a 12×12 grid
+EXP=scale3 AGENTS=5 BOSS=5 M=12 EPISODES=50000 bash battleship/run_battleship_grid.sh
+
+# SeqComm vs MAPPO head-to-head
+bash battleship/run_battleship_comparison.sh
 ```
 
-### Episode logging
+### 3. Monitor progress
 
-When `--log-dir` is set, each episode appends one JSON record to the log file:
+```bash
+tail -f runs/battleship_grid/<timestamp>/baseline_critic_seed0/logs/*.jsonl | \
+  python3 -c "
+import sys, json
+for line in sys.stdin:
+    d = json.loads(line)
+    if 'agents_won' in d:
+        print(f'ep={d[\"ep\"]:6d}  win={d[\"agents_won\"]}  boss_hits={d[\"boss_hits\"]}  stage={d.get(\"curriculum_stage\",0)}')
+"
+```
 
-```json
-{
-  "episode": 42,
-  "total_reward": 37.42,
-  "success": true,
-  "steps_to_completion": 87,
-  "deadlock": false,
-  "n_collisions": 2,
-  "n_goals_reached": 4,
-  "n_msgs_dropped": 7,
-  "order_entropy": 1.23,
-  "mean_intention_spread": 0.45,
-  "first_mover_counts": [12, 8, 15, 65],
-  "world_model_loss": 0.023400,
-  "value_loss": 0.145000,
-  "policy_loss": 0.012300
+### 4. Generate paper figures
+
+```bash
+# Regenerates all three paper figures
+.venv/bin/python battleship/make_paper_figures.py
+
+# Single-run figure for any log file
+.venv/bin/python battleship/plot_battleship.py \
+    runs/battleship_grid/<timestamp>/<config>/logs/*.jsonl \
+    --window 500
+```
+
+---
+
+## Curriculum
+
+Training uses a 13-stage curriculum (stages 0–12). A 1 000-episode rolling window must meet hit/win/zero-hit thresholds simultaneously to advance. Stage 12 is the hardest: full-HP bosses, no misses, fire period of 4 steps.
+
+| Stages | Boss HP | Boss miss prob | Fire period |
+|--------|---------|---------------|-------------|
+| 0–4 | 1 | 0.80 → 0.00 | 12 |
+| 5 | 1 | 0.00 | 10 |
+| 6–8 | 2 | 0.00 | 10 → 8 |
+| 9 (bridge) | 3 | 0.00 | 12 |
+| 10–12 | 3 | 0.00 | 10 → 4 |
+
+---
+
+## Reproducing paper results
+
+| Figure | Command | Expected |
+|--------|---------|----------|
+| Fig 1 — curriculum | `EXP=exp2 SINGLE_CONFIG=wm_loss00 EPISODES=50000 bash battleship/run_battleship_grid.sh` | Stage 12 by ~ep 34 000 |
+| Fig 2 — 2v1 grid | `EXP=exp2 EPISODES=50000 bash battleship/run_battleship_grid.sh` | All 8 configs ≥ 99% win |
+| Fig 3 — 3v3 | `EXP=scale3 AGENTS=3 BOSS=3 M=10 EPISODES=50000 bash battleship/run_battleship_grid.sh` | `wm_loss00` plateaus at ~85% |
+| Fig 3 — 5v5 | `EXP=scale3 AGENTS=5 BOSS=5 M=12 EPISODES=50000 bash battleship/run_battleship_grid.sh` | All configs ≥ 99% win |
+
+Full run-by-run experimental narrative with all numbers: [`EXPERIMENT_DEPOT.md`](EXPERIMENT_DEPOT.md)
+
+---
+
+## Reading the code
+
+| Want to understand… | Read… |
+|--------------------|-------|
+| Environment dynamics | `battleship/battleship_env.hh` |
+| C++ ↔ Python IPC | `battleship/battleship_sim.cc` |
+| PPO + world model | `battleship/train_battleship.py` |
+| CommGate | `train_battleship.py` → `class CommGate`, `update_comm_gate()` |
+| Curriculum logic | `battleship/run_battleship_grid.sh` → `advance_curriculum()` |
+| Math foundations | `math.md` |
+
+---
+
+## Citation
+
+```bibtex
+@inproceedings{Ding2024,
+  author    = {Ding, Ziluo and Liu, Zeyuan and Fang, Zhirui and Su, Kefan
+               and Zhu, Liwen and Lu, Zongqing},
+  title     = {Multi-Agent Coordination via Multi-Level Communication},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2024}
 }
 ```
-
-- `order_entropy` — Shannon entropy of the first-mover distribution across episode steps.
-  High (≈ log 4 ≈ 1.39) means all agents take turns leading; low means one agent dominates.
-- `mean_intention_spread` — average per-step std of agent intention values.
-  High means agents clearly differentiate their priorities each step.
-- `first_mover_counts` — how many steps each agent ranked first in the priority ordering.
-
-The first line of each log file is a `{"_meta": {...}}` record with all hyperparameters
-and the run timestamp, so the file is fully self-describing.
-
----
-
-## Algorithm
-
-Each timestep runs two phases across all agents concurrently as cotamer coroutines.
-
-### Negotiation phase
-
-1. **Encode** — agent encodes its observation: `h_i = e(o_i)` via `NeuralModels::encode`
-2. **Share hidden states** — broadcast `hidden_state_msg{id, h_i}` to the full clique, collect one from each neighbour
-3. **Compute intention** (Algorithm 5) — for each of `F` sampled random orderings of the clique, simulate `H` world-model steps:
-   - Act through the ordering top-down, each agent's action conditioned on the actions above it via `AM_a`
-   - Step the world model: `(o′_all, r) = M(AM_w(enc_obs_all, actions_all))`
-   - Bootstrap with critic `V` at the horizon
-   - Return mean discounted return over `F` orderings as agent `i`'s **intention** `I_i`
-4. **Share intentions** — broadcast `intention_msg{id, I_i}`, partition neighbours into `N_upper` (higher `I`) and `N_lower` (lower `I`)
-
-### Launching phase
-
-1. **Wait** for `upper_action_msg` from every agent in `N_upper`
-2. **Sample action** — `a_i ~ π(AM_a(h_i, a_upper))`
-3. **Send down** — forward `upper_action_msg{id, a_i}` to every agent in `N_lower`
-4. **Synchronise** — the agent with no lower neighbours broadcasts `execute_signal`; all others wait for it
-5. **Step** — call `env.submit_action(id, a_i)`; last agent to submit triggers the environment; all agents block on `env.get_result(id)` until results are ready
-6. **Record** — append `transition{obs, action, upper_actions, next_obs, reward, value, log_prob, log_prob_old}` to the shared trajectory buffer
-
----
-
-## How training works
-
-There are two training paths: a Python-only path for quick iteration, and the full
-C++ ↔ Python loop that uses the real concurrent SeqComm protocol for trajectory collection.
-
-### C++ ↔ Python training loop (primary path)
-
-C++ collects trajectories using the real concurrent protocol (coroutines, async message
-passing); Python does the gradient updates. They synchronise via three files in `weights/`:
-
-```
-weights/traj.bin      — flat binary trajectory written by C++ each episode
-weights/traj.ready    — sentinel: C++ touches this when traj.bin is complete
-weights/weights.ready — sentinel: Python touches this when new .pt files are saved
-```
-
-**Run in two terminals:**
-
-```bash
-# terminal 1 — C++ sim (blocks after each episode waiting for Python)
-./build/robot_sim/seqcomm-sim-trained weights/ 2000
-
-# terminal 2 — Python updater (blocks between episodes waiting for C++)
-python -m training.train_from_cpp weights/
-```
-
-Per episode the C++ sim:
-1. Runs one full SeqComm episode with `LibtorchNeuralModels`
-2. Serialises `std::vector<transition>` to `weights/traj.bin` via `trajectory_io.hh`
-3. Touches `weights/traj.ready`
-4. Polls for `weights/weights.ready`, then calls `LibtorchNeuralModels::reload()`
-
-Per episode the Python updater (`training/train_from_cpp.py`):
-1. Polls for `weights/traj.ready`
-2. Reads `traj.bin` with `numpy.frombuffer`, reassembles all-agent tensors by timestep
-3. Runs `compute_gae` + three MAPPO losses
-4. Saves six updated `.pt` files via `save_weights()`
-5. Touches `weights/weights.ready`
-
-**Bootstrap:** run `train.py` once first to create initial weights before starting the loop.
-
-```bash
-python -m training.train --episodes 100 --save-weights weights/
-```
-
-### Trajectory binary format (`trajectory_io.hh`)
-
-```
-header (16 bytes):  int32 n_agents, obs_dim, action_dim, n_transitions
-
-per transition:
-  int32                           agent_id, timestep, n_upper
-  float32[obs_dim]                obs
-  float32[action_dim]             action
-  float32[n_agents * action_dim]  upper_actions  (first n_upper slots filled)
-  float32[obs_dim]                next_obs
-  float32                         reward, value, log_prob, log_prob_old
-```
-
-### C++ side — trajectory collection
-
-`seqcomm_sim_trained.cc` is the multi-episode training harness.
-`seqcomm_sim.cc` is a single-episode demo with random stub models (no libtorch needed).
-
-The `NeuralModels` interface is the only seam between the two sides:
-
-```cpp
-struct NeuralModels {
-    virtual std::vector<float> encode(std::span<const float> obs) = 0;
-    virtual std::vector<float> attention_a(std::span<const float> h,
-                                           const std::vector<std::vector<float>>& msgs) = 0;
-    virtual std::vector<float> attention_w(const std::vector<std::vector<float>>& enc,
-                                           const std::vector<std::vector<float>>& acts) = 0;
-    virtual std::pair<std::vector<float>, float>
-                               policy_sample(std::span<const float> ctx) = 0;
-    virtual float              policy_log_prob_old(std::span<const float> ctx,
-                                                   std::span<const float> act) = 0;
-    virtual float              critic(std::span<const float> ctx) = 0;
-    virtual std::pair<std::vector<float>, float>
-                               world_model(std::span<const float> ctx) = 0;
-};
-```
-
-### Python side — gradient updates
-
-`train_world_model.py` implements the three MAPPO losses from the paper. Each loss
-trains a distinct subset of parameters:
-
-| Function | Paper eq. | Trains |
-|---|---|---|
-| `world_model_loss` | (4) | encoder + AM_w + world model M |
-| `value_loss` | (2) | encoder + AM_a + critic V |
-| `ppo_loss` | (3) | encoder + AM_a + policy π |
-
-`train_step` runs world model first (independent gradients), then value + policy jointly:
-
-```python
-# World model — eq (4)
-L_w = mean || (o′, r) − M(AM_w(e(o), a)) ||²
-
-# Value — eq (2)
-L_v = mean || V(AM_a(e(o_i), a_upper)) − R̂ ||²
-
-# Policy — eq (3), PPO-clip + GAE advantages
-L_π = −mean min(ρ·A,  clip(ρ, 1±ε)·A)
-```
-
-`compute_gae` turns the raw reward/value sequence from a trajectory into
-`(advantages, returns)` via generalised advantage estimation (γ=0.99, λ=0.95).
-
-### Training loop (Python-only path, no libtorch required)
-
-```python
-env = GaussianFieldEnv()          # execution/gaussian_field_env.py
-
-for episode in range(N_EPISODES):
-    obs = env.reset()
-    trajectory = []
-
-    for t in range(T):
-        # ── negotiation ──────────────────────────────────
-        h = [encoder(o) for o in obs]
-        intentions = [compute_intention(h, i, world_model, ...) for i in range(N)]
-        order = sorted(range(N), key=lambda i: -intentions[i])
-
-        # ── launching (cascade actions top-down) ─────────
-        a_upper = {}
-        actions, log_p, values = [], [], []
-        for i in order:
-            ctx = attn_a(h[i], [a_upper[j] for j in order if order.index(j) < order.index(i)])
-            a = policy.sample(ctx)
-            actions.append(a);  a_upper[i] = a
-            log_p.append(policy.log_prob(ctx, a))
-            values.append(critic(ctx))
-
-        next_obs, reward, _ = env.step(actions)
-        trajectory.append((obs, actions, ..., next_obs, reward, values, log_p))
-        obs = next_obs
-
-    advantages, returns = compute_gae([t.reward for t in trajectory],
-                                      [t.value  for t in trajectory])
-    losses = train_step(encoder, attn_a, attn_w,
-                        world_model_net, policy, critic,
-                        *tensorify(trajectory, advantages, returns),
-                        opt_world, opt_policy)
-```
-
-`gaussian_field_env.py` is a line-for-line Python mirror of the C++ environment so
-weights trained here plug directly into the C++ simulation without any adaptation.
-
----
-
-## Environment 1: Gaussian Field Coverage
-
-**Setup** — `G×G` grid (default 20×20), `K=3` Gaussian peaks moving with constant
-velocity and bouncing off walls. `N` agents navigate the grid.
-
-**Observation** `o_i` (length 27 with default `window_half=2`):
-```
-[row/G,  col/G,  field(r−2,c−2), ..., field(r+2,c+2)]
-```
-Normalised position plus a 5×5 local field window, zero-padded at borders.
-
-**Action** — integer in `{stay, up, down, left, right}`.
-
-**Reward** (joint, identical for all agents):
-```
-r = Σ_i F(p_i)  −  λ · |{(i,j) : p_i = p_j,  i < j}|
-```
-Sum of field values under each agent minus a penalty for any two agents sharing a cell.
-
-**What the world model must learn** — Gaussian trajectories are deterministic (linear
-plus wall bouncing) so peak positions are predictable from `H` steps of history. An
-agent that correctly forecasts where peaks will be in `H` steps gets a higher intention
-estimate, earns a higher priority, and stakes out high-value cells before lower-ranked
-agents are committed.
-
-**What SeqComm provides** — agents can't see the full field, only their local window.
-Upper agents share their hidden state (encoded local view) before lower agents act,
-giving lower agents indirect information about field conditions elsewhere in the grid.
-
----
-
-## Environment 2: Team Poker (SeqComm overgeneralization test)
-
-The primary environment for demonstrating and measuring the relative overgeneralization problem that SeqComm is designed to solve. See [`math.md`](math.md) for full derivations.
-
-**Setup** — N homogeneous agents (parameter-sharing) play repeated poker hands against a dealer. Each hand is one environment step; each episode is a sequence of hands.
-
-**Per hand:**
-1. Each agent i privately observes hand strength `H_i ~ Uniform[0, 1]`
-2. Team wins iff `H̄ > D` where `H̄ = mean(H_i)` and `D ~ Uniform[0, 1]` (dealer, revealed after bets)
-3. Each agent bets fraction `ρ_i = σ(action_i)` of current coffers `C_i`
-4. Win: `C_i → C_i · (1 + M · ρ_i)` — Lose: `C_i → C_i · (1 + α) · (1 - ρ_i)`
-
-**Observation** `o_i` (length `n_agents + 2`):
-```
-[H_i,  log(C_0/C_0), …, log(C_{N-1}/C_0),  t/K_max]
-```
-`H_i` is private — other agents' hand strengths can only be inferred from their bet sizes in the launching phase. Log-coffers are shared so all agents track episode progress.
-
-**Action** — raw continuous float; sigmoid applied in env so `ρ_i ∈ (0, 1)`.
-
-**Reward** — mean log-growth across agents per hand (shared scalar):
-```
-r = mean_i log(C_i_new / C_i_old)
-```
-
-**Episode terminates** when any agent hits `C_floor` (bankruptcy), any agent hits `C_target` (success), or `K_max` hands have been played.
-
-**What the world model must learn:**
-```
-r̂(H̄, ρ) = ρ · [H̄(M+1+α) - (1+α)]  +  (1-H̄) · α
-```
-A bilinear function of collective hand strength and bet fraction — representable by a single linear layer and learned quickly from experience.
-
-**What SeqComm provides** — the agent with the highest `H_i` produces the highest intention value under a well-trained world model (going first with a strong hand yields higher predicted log-growth). The launching phase lets followers invert the first mover's bet to estimate `H̄` and bet optimally. Agents learn Kelly fractions `ρ*(H̄) = max(0, (H̄(M+1)-1)/M)` rather than binary {0,1} bets, giving dense gradient signals throughout training.
-
-**Why it exposes overgeneralization** — the independent equilibrium threshold for each agent is `θ_ind = N·θ_opt - (N-1)/2`, which falls below zero for N=4 with default parameters. Independent agents therefore always bet, while the optimal policy is to bet proportionally to hand strength. The ordering gap `Δθ = (N-1)(M-1-α)/(2(M+1+α)) ≈ 0.44` for N=4 creates a measurable EV penalty (~9-10%) that vanishes under correct SeqComm ordering.
-
-**Key metrics logged per episode:**
-- `poker_win_rate` — fraction of hands won
-- `poker_mean_bet` — mean bet fraction across hands
-- `poker_bankruptcy` — whether episode ended at `C_floor`
-- `poker_target_hit` — whether episode ended at `C_target`
-- `poker_hands_played` — actual episode length
-- `poker_final_coffers` — per-agent coffer values at termination
-
-**Run the five baseline variants:**
-```bash
-for mode in seqcomm mappo seqcomm_random seqcomm_no_action seqcomm_fixed; do
-  for seed in 0 1 2; do
-    python3 -m training.train \
-      --env poker --mode $mode --seed $seed \
-      --episodes 2000 --log-dir logs/
-  done
-done
-```
-
-Expected result: `seqcomm` drives `poker_bankruptcy` down and `poker_hands_played` up relative to `seqcomm_fixed` and `mappo`, demonstrating that intention-value ordering recovers the coordination value lost to overgeneralization.
-
----
-
-## Environment 3 (roadmap): Archipelago Survival
-
-*"Keeping things afloat"* — the team must collectively stay alive.
-Coordination is existential rather than purely reward-maximising.
-
-### Concept
-
-The grid has `K` island cells where `K < N` (not enough islands for everyone).
-Open water slowly drains each agent's survival level `s_i ∈ [0, 1]`.
-An island replenishes the agent that occupies it — but only if that agent is there alone.
-Two agents on the same island both take the penalty instead.
-
-```
-Each timestep, for each agent i:
-
-  unoccupied island  →  s_i ← min(1,  s_i + δ_replenish)
-  contested island   →  s_i ← max(0,  s_i − δ_penalty)
-  open water         →  s_i ← max(0,  s_i − δ_drain)
-
-Joint reward:
-  r = mean_i(s_i)  −  λ · collisions
-```
-
-Agents with `s_i = 0` are lost and contribute nothing to the team score for the rest
-of the episode. The team's goal is to maximise the survival integral over T timesteps.
-
-### Why SeqComm handles this naturally
-
-With `K < N` islands the assignment problem is strictly competitive within the team —
-two agents on one island is always a net loss. SeqComm resolves it without any explicit
-"I'm going here" protocol:
-
-- **High-intention agents** (better world-model predictions of where islands will be
-  in `H` steps) commit to a cell first.
-- **Low-intention agents** receive those choices as `upper_action_msg` before they
-  decide, and route to unclaimed islands rather than competing.
-- The cascade naturally solves the assignment in priority order, one level at a time.
-
-An agent's urgency (`s_i` close to 0) feeds through the encoder into its hidden state,
-so neighbours see it during negotiation and can route around an agent that is critically
-low and must reach the nearest island at all costs.
-
-### Observation extension
-
-```
-[row/G,  col/G,  field_window,  s_i,  nearest_island_dist/G]
-```
-
-Adding `s_i` and approximate island proximity gives the world model the signal it needs
-to predict multi-step survival trajectories.
-
-### Island dynamics
-
-Islands shift slowly each step with the same bouncing-velocity physics as the Gaussian
-peaks, making them predictable (good for the world model) but requiring ongoing
-tracking. This is a direct structural extension of Environment 1 — the learned world
-model architecture transfers without modification.
-
-### Generalisation path
-
-| Variation | What it stresses |
-|---|---|
-| Reduce K | Harder assignment; more agents forced into water |
-| Heterogeneous drain rates | Priority ordering must adapt to urgency, not just prediction quality |
-| Hidden `s_j` of others | Agents must infer neighbours' urgency from negotiation hidden states |
-| Island capacity > 1 | Softens hard exclusion; partial sharing with diminishing returns |
-| Islands appear/disappear | World model must predict availability, not just position |
-
----
-
-## Interfaces — adding a new environment
-
-Subclass `Environment` in `agent_action.hh`. Two methods required:
-
-```cpp
-struct MyEnv : Environment {
-    // Called by each agent. Last agent to call triggers the step.
-    void submit_action(int agent_id, std::span<const float> action) override;
-
-    // Coroutine: suspends until all N agents have submitted, then returns.
-    cot::task<std::pair<std::vector<float>, float>> get_result(int agent_id) override;
-};
-```
-
-Pass an instance to `Agent` in `seqcomm_sim.cc` — everything else (negotiation,
-launching, trajectory recording) is environment-agnostic.
-
-
-Think about what is so slow:
-It's bad to be writing out for every trajectory step and have two processes coordinating.
-
----
-
-## Battleship paper experiments
-
-The `battleship/` subdirectory contains a fully trained collaborative battleship
-environment (N agent ships vs boss ships on an 8×8 grid) used for the two paper
-experiments below.  Both experiments compare variants of the SeqComm ordering
-protocol and require the C++ ↔ Python training loop described above.
-
-### Building the battleship simulator
-
-```bash
-make -C build-local battleship-sim
-# or, if starting fresh:
-cmake -B build-local -DUSE_TORCH=ON \
-  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch; print(torch.utils.cmake_prefix_path)")
-cmake --build build-local --target battleship-sim
-```
-
-### Experiment 1 — World-Model Intention Ordering vs Comms Loss
-
-**Research question:** Does using the real world-model rollout (H=2) to compute the
-ordering signal improve coordination, and how much does random communication loss
-degrade that benefit?
-
-**What was changed:**
-
-| File | Change |
-|------|--------|
-| `robot_sim/agent_action.hh` | Added `use_wm_intention`, `wm_H`, `comms_loss_prob` fields to Agent |
-| `robot_sim/agent_action.cc` | `negotiation_phase()`: when `use_wm_intention=true`, broadcasts `hidden_state_msg` (round 1), collects all h_j, runs H-step world-model rollout locally, uses cumulative predicted reward as intention signal; when `comms_loss_prob > 0`, skips negotiation with that probability and falls back to random ordering |
-| `battleship/battleship_sim.cc` | CLI flags `--wm-intention`, `--wm-H N`, `--comms-loss P`; logs `comms_ok`, `comms_total`, `comm_rate` per episode |
-
-**Variants run (5 configs × 3 seeds = 15 runs):**
-
-| Config | Ordering signal | Comms loss |
-|--------|----------------|------------|
-| `baseline_critic` | V(h_i) critic proxy | 0% |
-| `wm_loss00` | H=2 WM rollout | 0% |
-| `wm_loss10` | H=2 WM rollout | 10% |
-| `wm_loss20` | H=2 WM rollout | 20% |
-| `wm_loss30` | H=2 WM rollout | 30% |
-
-**How to run:**
-
-```bash
-# Full grid (5 configs × 3 seeds, sequential)
-EXP=exp1 EPISODES=5000 SEEDS="0 1 2" bash battleship/run_battleship_grid.sh
-
-# Single variant for quick check
-SINGLE_CONFIG="wm_loss10|16|0.0003|0.003|0.15" \
-  EPISODES=3000 SEEDS="0" bash battleship/run_battleship_grid.sh
-```
-
-Results land in `runs/battleship_grid/<timestamp>/summary.csv`.  Key columns:
-`last500_win` (win rate), `last500_comm_rate` (fraction of steps with successful ordering).
-
----
-
-### Experiment 2 — Optional Communication Gate
-
-**Research question:** If agents can choose NOT to communicate (and communication costs
-a small reward penalty), do they learn to stop communicating as the penalty grows?
-
-**What was changed:**
-
-| File | Change |
-|------|--------|
-| `robot_sim/agent_action.hh` | Added `use_comm_gate`, `comm_penalty`, `did_comm_this_step`, `comm_log` fields |
-| `robot_sim/agent_action.cc` | `negotiation_phase()`: when `use_comm_gate=true`, each agent independently samples `do_comm ~ Bernoulli(σ(gate(h)))` and broadcasts a sentinel if opting out; any sentinel detected → random ordering for that step. `launching_phase()`: subtracts `comm_penalty` from reward when `did_comm_this_step=true` |
-| `robot_sim/libtorch_models.hh` | Loads optional `comm_gate.pt`; `comm_gate(h)` returns logit; updated each episode from disk |
-| `battleship/battleship_sim.cc` | CLI flags `--comm-gate`, `--comm-penalty R`; writes `comm_gate_sidecar.bin` (per-step comm decisions) alongside `traj.bin` |
-| `battleship/train_battleship.py` | `CommGate(embed_dim→1)` module; `read_comm_gate_sidecar()`; `update_comm_gate()` REINFORCE update using episode reward minus penalty cost; saves `comm_gate.pt` after each batch |
-
-**Variants run (3 configs × 3 seeds = 9 runs):**
-
-| Config | Comm penalty | Expected behaviour |
-|--------|-------------|-------------------|
-| `commgate_tiny` | 0.005 | agents comm almost always (benefit > cost) |
-| `commgate_medium` | 0.050 | mixed — comm rate drops as policy converges |
-| `commgate_large` | 0.500 | agents learn to stop communicating |
-
-All three variants also use `--wm-intention` so ordering quality (when agents DO comm)
-matches Experiment 1's WM condition.
-
-**How to run:**
-
-```bash
-# Full grid (3 configs × 3 seeds)
-EXP=exp2 EPISODES=5000 SEEDS="0 1 2" bash battleship/run_battleship_grid.sh
-
-# Single variant
-SINGLE_CONFIG="commgate_medium|16|0.0003|0.003|0.15" \
-  EXP=exp2 EPISODES=3000 SEEDS="0" bash battleship/run_battleship_grid.sh
-```
-
-Key result column in `summary.csv`: `last500_comm_rate` — the fraction of negotiation
-steps in the final 500 episodes where all agents chose to communicate.
-
-**Training initialisation note:** Experiment 2 uses a separate `comm_gate.pt` module.
-The `--init` step writes it automatically when `--comm-gate` is passed (handled by the
-grid script).  Do NOT share a `weights/` directory between Experiment 2 and baseline runs.
-
----
-
-### Reading experiment logs
-
-Each run produces a JSONL log at `runs/battleship_grid/<ts>/<run_id>/logs/*.jsonl`.
-The first line is a `{"_meta": {...}}` record containing all hyperparameters including
-`use_wm_intention`, `comms_loss_prob`, `use_comm_gate`, and `comm_penalty`.
-
-Each subsequent line is one episode:
-
-```json
-{
-  "ep": 42,
-  "reward": 3.21,
-  "steps": 28,
-  "boss_hits": 2,
-  "agents_won": true,
-  "comms_ok": 25,
-  "comms_total": 28,
-  "comm_rate": 0.893,
-  "curriculum_stage": 3
-}
-```
-
-`comm_rate = comms_ok / comms_total`:
-- Experiment 1: equals 1 for baseline/WM-0% runs; drops proportionally to `comms_loss_prob`
-  for WM-10/20/30 runs.
-- Experiment 2: starts near 1.0 and decreases as agents learn the penalty is too high.
-  Compare across penalty levels to see the learned trade-off.
-
-
-Also in training, we should be doing less steps per gradient update? Or just shorten episodes
